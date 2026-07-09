@@ -1,6 +1,7 @@
 package model
 
 import (
+	"encoding/json"
 	"strings"
 	"time"
 )
@@ -74,28 +75,64 @@ func isAlpha(b byte) bool {
 }
 
 type Event struct {
-	Timestamp time.Time
-	Level     Level
-	Source    string
-	Message   string
-	Raw       string
-	LineNum   int
+	Timestamp time.Time `json:"timestamp"`
+	Level     Level     `json:"level"`
+	Source    string    `json:"source"`
+	Message   string    `json:"message"`
+	Raw       string    `json:"raw"`
+	LineNum   int       `json:"line"`
 }
 
 type Group struct {
-	Signature     string
-	SampleMessage string
-	Count         int
-	FirstSeen     time.Time
-	LastSeen      time.Time
-	Index         int
+	Signature     string    `json:"signature"`
+	SampleMessage string    `json:"sample"`
+	Count         int       `json:"count"`
+	FirstSeen     time.Time `json:"first_seen"`
+	LastSeen      time.Time `json:"last_seen"`
+	Index         int       `json:"-"`
 }
 
 type Report struct {
-	Source     string
-	TotalLines int
-	Levels     map[Level]int
-	TopErrors  []Group
-	FirstLine  time.Time
-	LastLine   time.Time
+	Source     string        `json:"source"`
+	TotalLines int           `json:"total_lines"`
+	Levels     map[Level]int `json:"-"`
+	LevelsStr  map[string]int `json:"levels"`
+	TopErrors  []Group       `json:"top_errors,omitempty"`
+	FirstLine  time.Time     `json:"first_line"`
+	LastLine   time.Time     `json:"last_line"`
+}
+
+func (r *Report) MarshalJSON() ([]byte, error) {
+	type Alias Report
+	r.LevelsStr = make(map[string]int, len(r.Levels))
+	for lvl, count := range r.Levels {
+		r.LevelsStr[lvl.String()] = count
+	}
+	return json.Marshal(&struct{ *Alias }{Alias: (*Alias)(r)})
+}
+
+func (r *Report) UnmarshalJSON(data []byte) error {
+	type Alias struct {
+		Levels    map[string]int `json:"levels"`
+		Source    string        `json:"source"`
+		TotalLines int          `json:"total_lines"`
+		TopErrors []Group       `json:"top_errors"`
+		FirstLine time.Time     `json:"first_line"`
+		LastLine  time.Time     `json:"last_line"`
+	}
+	var a Alias
+	if err := json.Unmarshal(data, &a); err != nil {
+		return err
+	}
+	r.Source = a.Source
+	r.TotalLines = a.TotalLines
+	r.Levels = make(map[Level]int, len(a.Levels))
+	for k, v := range a.Levels {
+		lvl, _ := ParseLevel(k)
+		r.Levels[lvl] = v
+	}
+	r.TopErrors = a.TopErrors
+	r.FirstLine = a.FirstLine
+	r.LastLine = a.LastLine
+	return nil
 }

@@ -1,0 +1,306 @@
+package server
+
+import (
+	"encoding/json"
+	"fmt"
+	"io"
+	"log"
+	"net/http"
+	"os"
+	"path/filepath"
+	"regexp"
+	"time"
+
+	"github.com/username/loganalyze/internal/analyzer"
+	"github.com/username/loganalyze/internal/filter"
+	"github.com/username/loganalyze/internal/model"
+	"github.com/username/loganalyze/internal/parser"
+	"github.com/username/loganalyze/internal/reader"
+	"github.com/username/loganalyze/internal/session"
+)
+
+func (s *Server) handleUpload(w http.ResponseWriter, r *http.Request) {
+	r.Body = http.MaxBytesReader(w, r.Body, 100<<20)
+	if err := r.ParseMultipartForm(10 << 20); err != nil {
+		http.Error(w, "file too large (max 100MB)", http.StatusBadRequest)
+		return
+	}
+
+	file, header, err := r.FormFile("file")
+	if err != nil {
+		http.Error(w, "missing file", http.StatusBadRequest)
+		return
+	}
+	defer file.Close()
+
+	name := sanitizeFilename(header.Filename)
+	if name == "" {
+		name = fmt.Sprintf("upload_%d.log", time.Now().UnixNano())
+	}
+
+	id := fmt.Sprintf("%x", time.Now().UnixNano())
+	dst := filepath.Join(s.dataDir, id+".log")
+
+	f, err := os.Create(dst)
+	if err != nil {
+		log.Printf("error creating file: %v", err)
+		http.Error(w, "internal error", http.StatusInternalServerError)
+		return
+	}
+	defer f.Close()
+
+	if _, err := io.Copy(f, file); err != nil {
+		log.Printf("error saving file: %v", err)
+		os.Remove(dst)
+		http.Error(w, "internal error", http.StatusInternalServerError)
+		return
+	}
+
+	ses := s.sessions.Create(dst, name, session.AnalyzeConfig{})
+	writeJSON(w, http.StatusCreated, map[string]string{"session_id": ses.ID})
+}
+
+func (s *Server) handleAnalyze(w http.ResponseWriter, r *http.Request) {
+	ses := s.getSession(w, r)
+	if ses == nil {
+		return
+	}
+
+	var req struct {
+		Command string `json:"command"`
+		Level   string `json:"level"`
+		Regex   string `json:"regex"`
+		Limit   int    `json:"limit"`
+		Since   string `json:"since"`
+		Until   string `json:"until"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		http.Error(w, "invalid request body", http.StatusBadRequest)
+		return
+	}
+
+	switch req.Command {
+	case "scan", "errors", "top", "grep":
+	default:
+		http.Error(w, "unknown command: "+req.Command, http.StatusBadRequest)
+		return
+	}
+
+	ses.Config = session.AnalyzeConfig{
+		Command: req.Command,
+		Level:   req.Level,
+		Regex:   req.Regex,
+		Limit:   req.Limit,
+		Since:   req.Since,
+		Until:   req.Until,
+	}
+	ses.SetRunning()
+
+	go s.runAnalysis(ses)
+	writeJSON(w, http.StatusAccepted, map[string]string{"status": "running"})
+}
+
+func (s *Server) handleResults(w http.ResponseWriter, r *http.Request) {
+	ses := s.getSession(w, r)
+	if ses == nil {
+		return
+	}
+
+	resp := map[string]interface{}{
+		"status": ses.Status,
+	}
+	if ses.Status == "complete" {
+		resp["report"] = ses.Report
+		if ses.Events == nil {
+			resp["events"] = []model.Event{}
+		} else {
+			resp["events"] = ses.Events
+		}
+	}
+	if ses.Status == "error" {
+		resp["error"] = ses.Error
+	}
+	writeJSON(w, http.StatusOK, resp)
+}
+
+func (s *Server) handleStatus(w http.ResponseWriter, r *http.Request) {
+	ses := s.getSession(w, r)
+	if ses == nil {
+		return
+	}
+
+	flusher, ok := w.(http.Flusher)
+	if !ok {
+		http.Error(w, "streaming not supported", http.StatusInternalServerError)
+		return
+	}
+
+	w.Header().Set("Content-Type", "text/event-stream")
+	w.Header().Set("Cache-Control", "no-cache")
+	w.Header().Set("Connection", "keep-alive")
+
+	ticker := time.NewTicker(500 * time.Millisecond)
+	defer ticker.Stop()
+
+	done := r.Context().Done()
+	for {
+		select {
+		case <-done:
+			return
+		case <-ticker.C:
+			status := ses.GetStatus()
+			progress := ses.GetProgress()
+
+			switch status {
+			case "complete":
+				fmt.Fprintf(w, "event: complete\ndata: {\"status\":\"complete\"}\n\n")
+				flusher.Flush()
+				return
+			case "error":
+				fmt.Fprintf(w, "event: error\ndata: {\"status\":\"error\"}\n\n")
+				flusher.Flush()
+				return
+			default:
+				if progress != "" {
+					data := fmt.Sprintf(`{"status":"running","progress":%q}`, progress)
+					fmt.Fprintf(w, "event: progress\ndata: %s\n\n", data)
+					flusher.Flush()
+				}
+			}
+		}
+	}
+}
+
+func (s *Server) handleListSessions(w http.ResponseWriter, r *http.Request) {
+	sessions := s.sessions.List()
+	type sessionSummary struct {
+		ID        string `json:"id"`
+		FileName  string `json:"file_name"`
+		Status    string `json:"status"`
+		CreatedAt string `json:"created_at"`
+	}
+	summaries := make([]sessionSummary, 0, len(sessions))
+	for _, ses := range sessions {
+		summaries = append(summaries, sessionSummary{
+			ID:        ses.ID,
+			FileName:  ses.FileName,
+			Status:    ses.Status,
+			CreatedAt: ses.CreatedAt.Format(time.RFC3339),
+		})
+	}
+	writeJSON(w, http.StatusOK, map[string]interface{}{"sessions": summaries})
+}
+
+func (s *Server) handleDeleteSession(w http.ResponseWriter, r *http.Request) {
+	ses := s.getSession(w, r)
+	if ses == nil {
+		return
+	}
+	os.Remove(ses.FilePath)
+	s.sessions.Delete(ses.ID)
+	writeJSON(w, http.StatusOK, map[string]bool{"deleted": true})
+}
+
+func (s *Server) handleHealth(w http.ResponseWriter, r *http.Request) {
+	writeJSON(w, http.StatusOK, map[string]string{"status": "ok"})
+}
+
+func (s *Server) getSession(w http.ResponseWriter, r *http.Request) *session.Session {
+	id := r.PathValue("id")
+	if id == "" {
+		http.Error(w, "missing session id", http.StatusBadRequest)
+		return nil
+	}
+	ses := s.sessions.Get(id)
+	if ses == nil {
+		http.Error(w, "session not found", http.StatusNotFound)
+		return nil
+	}
+	return ses
+}
+
+func (s *Server) runAnalysis(ses *session.Session) {
+	cfg := buildFilterConfig(ses.Config)
+	lines := reader.ReadLines([]string{ses.FilePath}, false)
+
+	eventCh := make(chan model.Event, 1000)
+	go func() {
+		defer close(eventCh)
+		lineCount := 0
+		for line := range lines {
+			evt := parser.ParseLine(line.Text, line.Line, line.Source)
+			if filter.Matches(evt, cfg) {
+				lineCount++
+				if lineCount%1000 == 0 {
+					ses.SetProgress(fmt.Sprintf("parsed %d lines", lineCount))
+				}
+				eventCh <- evt
+			}
+		}
+		ses.SetProgress(fmt.Sprintf("parsing complete: %d events", lineCount))
+	}()
+
+	switch ses.Config.Command {
+	case "scan", "top":
+		limit := ses.Config.Limit
+		if limit <= 0 {
+			limit = 10
+		}
+		r := analyzer.Analyze(eventCh, limit)
+		r.Source = ses.FileName
+		ses.SetProgress("analysis complete")
+		ses.SetComplete(&r, nil)
+	case "errors", "grep":
+		var events []model.Event
+		for evt := range eventCh {
+			events = append(events, evt)
+		}
+		ses.SetProgress(fmt.Sprintf("matched %d events", len(events)))
+		ses.SetComplete(nil, events)
+	}
+}
+
+func buildFilterConfig(cfg session.AnalyzeConfig) filter.Config {
+	fc := filter.Config{MinLevel: model.LevelDebug}
+	if cfg.Level != "" {
+		if lvl, ok := model.ParseLevel(cfg.Level); ok {
+			fc.MinLevel = lvl
+		}
+	}
+	if cfg.Regex != "" {
+		fc.Regex = regexp.MustCompile(cfg.Regex)
+	}
+	if cfg.Since != "" {
+		if d, err := time.ParseDuration(cfg.Since); err == nil {
+			fc.Since = time.Now().Add(-d)
+		}
+	}
+	if cfg.Until != "" {
+		if t, err := time.Parse(time.RFC3339, cfg.Until); err == nil {
+			fc.Until = t
+		}
+	}
+	if cfg.Command == "errors" || cfg.Command == "top" {
+		if fc.MinLevel < model.LevelError {
+			fc.MinLevel = model.LevelError
+		}
+	}
+	return fc
+}
+
+func sanitizeFilename(name string) string {
+	var result []rune
+	for _, r := range name {
+		if r == '/' || r == '\\' || r == ':' {
+			continue
+		}
+		result = append(result, r)
+	}
+	return string(result)
+}
+
+func writeJSON(w http.ResponseWriter, status int, v interface{}) {
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(status)
+	json.NewEncoder(w).Encode(v)
+}
