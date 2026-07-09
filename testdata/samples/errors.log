@@ -1,0 +1,15 @@
+2026-07-08T10:12:33Z ERROR database connection timeout after 30s on host 10.0.0.5
+2026-07-08T10:12:34Z ERROR database connection timeout after 30s on host 10.0.0.5
+2026-07-08T10:12:35Z WARN disk usage at 85%, cleaning old logs
+2026-07-08T10:12:36Z ERROR database connection timeout after 30s on host 10.0.0.6
+2026-07-08T10:12:37Z ERROR request failed: POST /api/users timeout
+2026-07-08T10:12:38Z ERROR database connection timeout after 30s on host 10.0.0.5
+2026-07-08T10:12:39Z WARN memory usage at 92%, gc triggered
+2026-07-08T10:12:40Z ERROR request failed: POST /api/users timeout
+2026-07-08T10:12:41Z FATAL panic: runtime error: invalid memory address
+2026-07-08T10:12:42Z INFO server started on port 8080
+2026-07-08T10:12:43Z DEBUG request GET /health took 42ms
+2026-07-08T10:12:44Z ERROR request failed: POST /api/users timeout
+2026-07-08T10:12:45Z WARN memory usage at 92%, gc triggered
+2026-07-08T10:12:46Z ERROR database connection timeout after 60s on host 10.0.0.7
+2026-07-08T10:12:47Z ERROR database connection timeout after 30s on host 10.0.0.5

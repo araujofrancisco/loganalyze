@@ -1,0 +1,7 @@
+Jul  8 10:12:33 hostname sshd[1234]: Failed password for root from 192.168.1.100 port 22
+Jul  8 10:12:34 hostname sshd[1234]: Failed password for root from 192.168.1.100 port 22
+Jul  8 10:12:35 hostname sshd[1235]: Accepted publickey for user from 10.0.0.1 port 54321
+Jul  8 10:12:36 hostname kernel: [UFW BLOCK] IN=eth0 OUT= SRC=203.0.113.5 DST=10.0.0.2
+Jul  8 10:12:37 hostname sshd[1234]: Failed password for root from 192.168.1.100 port 22
+Jul  8 10:12:38 hostname kernel: [UFW BLOCK] IN=eth0 OUT= SRC=203.0.113.5 DST=10.0.0.2
+Jul  8 10:12:39 hostname sshd[1236]: Failed password for admin from 10.0.0.100 port 22
