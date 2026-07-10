@@ -1,6 +1,7 @@
 package server
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -9,6 +10,7 @@ import (
 	"os"
 	"path/filepath"
 	"regexp"
+	"strings"
 	"time"
 
 	"github.com/username/loganalyze/internal/analyzer"
@@ -17,6 +19,7 @@ import (
 	"github.com/username/loganalyze/internal/parser"
 	"github.com/username/loganalyze/internal/reader"
 	"github.com/username/loganalyze/internal/session"
+	"github.com/username/loganalyze/internal/summarizer"
 )
 
 func (s *Server) handleUpload(w http.ResponseWriter, r *http.Request) {
@@ -115,11 +118,170 @@ func (s *Server) handleResults(w http.ResponseWriter, r *http.Request) {
 		if ses.Events != nil {
 			resp["events"] = ses.Events
 		}
+		if ses.Summary != nil {
+			resp["summary"] = ses.Summary.Text
+		}
 	}
 	if ses.Status == "error" {
 		resp["error"] = ses.Error
 	}
 	writeJSON(w, http.StatusOK, resp)
+}
+
+func (s *Server) buildInsightsRequest(ses *session.Session) (*summarizer.SummaryRequest, error) {
+	if ses.Report == nil {
+		return nil, fmt.Errorf("session has no report data")
+	}
+
+	levels := make(map[string]int)
+	for lvl, count := range ses.Report.Levels {
+		levels[lvl.String()] = count
+	}
+
+	timeRange := ""
+	if !ses.Report.FirstLine.IsZero() && !ses.Report.LastLine.IsZero() {
+		timeRange = fmt.Sprintf("%s — %s",
+			ses.Report.FirstLine.Format("2006-01-02 15:04:05"),
+			ses.Report.LastLine.Format("2006-01-02 15:04:05"))
+	}
+
+	top := make([]summarizer.ErrorGroupSummary, len(ses.Report.TopErrors))
+	for i, g := range ses.Report.TopErrors {
+		top[i] = summarizer.ErrorGroupSummary{
+			Signature:     g.Signature,
+			SampleMessage: g.SampleMessage,
+			Count:         g.Count,
+		}
+	}
+
+	return &summarizer.SummaryRequest{
+		Source:     ses.Report.Source,
+		TotalLines: ses.Report.TotalLines,
+		Levels:     levels,
+		TimeRange:  timeRange,
+		TopErrors:  top,
+	}, nil
+}
+
+func (s *Server) handleInsights(w http.ResponseWriter, r *http.Request) {
+	ses := s.getSession(w, r)
+	if ses == nil {
+		return
+	}
+
+	if ses.Summary != nil {
+		writeJSON(w, http.StatusOK, map[string]interface{}{
+			"summary":  ses.Summary.Text,
+			"model":    ses.Summary.ModelUsed,
+			"cached":   true,
+		})
+		return
+	}
+
+	if s.summarizer == nil {
+		http.Error(w, "AI summarizer not configured (set --ai-endpoint)", http.StatusNotImplemented)
+		return
+	}
+
+	if ses.Status != "complete" {
+		http.Error(w, "analysis not complete yet", http.StatusConflict)
+		return
+	}
+
+	req, err := s.buildInsightsRequest(ses)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
+	}
+
+	ctx, cancel := context.WithTimeout(r.Context(), 60*time.Second)
+	defer cancel()
+
+	summary, err := s.summarizer.Summarize(ctx, *req)
+	if err != nil {
+		log.Printf("insights error for session %s: %v", ses.ID, err)
+		http.Error(w, "AI summarization failed: "+err.Error(), http.StatusInternalServerError)
+		return
+	}
+
+	ses.SetSummary(summary)
+	writeJSON(w, http.StatusOK, map[string]interface{}{
+		"summary": summary.Text,
+		"model":   summary.ModelUsed,
+		"cached":  false,
+	})
+}
+
+func (s *Server) handleInsightsStream(w http.ResponseWriter, r *http.Request) {
+	ses := s.getSession(w, r)
+	if ses == nil {
+		return
+	}
+
+	if s.summarizer == nil {
+		http.Error(w, "AI summarizer not configured (set --ai-endpoint)", http.StatusNotImplemented)
+		return
+	}
+
+	if ses.Status != "complete" {
+		http.Error(w, "analysis not complete yet", http.StatusConflict)
+		return
+	}
+
+	flusher, ok := w.(http.Flusher)
+	if !ok {
+		http.Error(w, "streaming not supported", http.StatusInternalServerError)
+		return
+	}
+
+	w.Header().Set("Content-Type", "text/event-stream")
+	w.Header().Set("Cache-Control", "no-cache")
+	w.Header().Set("Connection", "keep-alive")
+
+	// If already cached, stream the cached text
+	if ses.Summary != nil {
+		fmt.Fprintf(w, "data: {\"type\":\"text\",\"content\":%q}\n\n", ses.Summary.Text)
+		fmt.Fprintf(w, "event: complete\ndata: {\"type\":\"done\"}\n\n")
+		flusher.Flush()
+		return
+	}
+
+	req, err := s.buildInsightsRequest(ses)
+	if err != nil {
+		fmt.Fprintf(w, "event: error\ndata: {\"type\":\"error\",\"content\":%q}\n\n", err.Error())
+		flusher.Flush()
+		return
+	}
+
+	ctx, cancel := context.WithTimeout(r.Context(), 120*time.Second)
+	defer cancel()
+
+	ch, err := s.summarizer.SummarizeStream(ctx, *req)
+	if err != nil {
+		fmt.Fprintf(w, "event: error\ndata: {\"type\":\"error\",\"content\":%q}\n\n", err.Error())
+		flusher.Flush()
+		return
+	}
+
+	var fullText strings.Builder
+	for token := range ch {
+		if strings.HasPrefix(token, "error:") {
+			fmt.Fprintf(w, "event: error\ndata: {\"type\":\"error\",\"content\":%q}\n\n", token)
+			flusher.Flush()
+			return
+		}
+		fullText.WriteString(token)
+		fmt.Fprintf(w, "data: {\"type\":\"text\",\"content\":%q}\n\n", token)
+		flusher.Flush()
+	}
+
+	fmt.Fprintf(w, "event: complete\ndata: {\"type\":\"done\"}\n\n")
+	flusher.Flush()
+
+	ses.SetSummary(&summarizer.Summary{
+		Text:      fullText.String(),
+		ModelUsed: s.aiModel,
+	})
 }
 
 func (s *Server) handleStatus(w http.ResponseWriter, r *http.Request) {

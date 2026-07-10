@@ -7,6 +7,7 @@ import (
 	"time"
 
 	"github.com/username/loganalyze/internal/model"
+	"github.com/username/loganalyze/internal/summarizer"
 )
 
 type AnalyzeConfig struct {
@@ -26,6 +27,7 @@ type Session struct {
 	Progress  string
 	Report    *model.Report
 	Events    []model.Event
+	Summary   *summarizer.Summary
 	Error     string
 	CreatedAt time.Time
 	Config    AnalyzeConfig
@@ -62,6 +64,12 @@ func (s *Session) SetError(err string) {
 	s.mu.Lock()
 	s.Status = "error"
 	s.Error = err
+	s.mu.Unlock()
+}
+
+func (s *Session) SetSummary(summary *summarizer.Summary) {
+	s.mu.Lock()
+	s.Summary = summary
 	s.mu.Unlock()
 }
 

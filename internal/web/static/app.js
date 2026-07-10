@@ -561,6 +561,8 @@ async function renderUploadResults(sessionId, cmd, resultEl) {
 }
 
 /* --- Session Detail ------------------------------------------ */
+let _sessionInsightsLoaded = {};
+
 function renderSession(id) {
   const html = `
     <div class="breadcrumb">
@@ -571,10 +573,12 @@ function renderSession(id) {
     <div class="tab-bar">
       <button class="tab-item active" data-tab="overview">Overview</button>
       <button class="tab-item" data-tab="events">Events</button>
+      <button class="tab-item" data-tab="insights">AI Insights</button>
       <button class="tab-item" data-tab="raw">Raw</button>
     </div>
     <div id="tab-overview" class="tab-content active"><div class="card"><div class="empty-state"><h3>Loading...</h3></div></div></div>
     <div id="tab-events" class="tab-content"><div class="card"><div class="empty-state"><h3>Loading...</h3></div></div></div>
+    <div id="tab-insights" class="tab-content"><div class="card"><div class="empty-state"><h3>Loading...</h3></div></div></div>
     <div id="tab-raw" class="tab-content"><div class="empty-state" id="raw-loading"><h3>Loading...</h3></div></div>
   `;
 
@@ -591,8 +595,16 @@ function setupSessionTabs() {
       $$('.tab-item').forEach(t => t.classList.remove('active'));
       $$('.tab-content').forEach(c => c.classList.remove('active'));
       this.classList.add('active');
-      const target = $('#tab-' + this.getAttribute('data-tab'));
+      const tabName = this.getAttribute('data-tab');
+      const target = $('#tab-' + tabName);
       if (target) target.classList.add('active');
+
+      if (tabName === 'insights') {
+        const id = location.pathname.split('/')[2];
+        if (id && !_sessionInsightsLoaded[id]) {
+          loadInsightsTab(id);
+        }
+      }
     });
   });
 }
@@ -870,6 +882,50 @@ async function loadRawTab(id) {
   } catch (_) {
     $('#tab-raw').innerHTML = '<div class="empty-state"><h3>Failed to load raw file</h3></div>';
   }
+}
+
+/* --- AI Insights tab ----------------------------------------- */
+function loadInsightsTab(id) {
+  const el = $('#tab-insights');
+  if (!el) return;
+
+  _sessionInsightsLoaded[id] = true;
+  el.innerHTML = '<div class="card"><div class="empty-state"><div class="spinner" style="width:16px;height:16px;border:2px solid var(--border);border-top-color:var(--accent);border-radius:50%;animation:spin 0.8s linear infinite;margin:0 auto 12px"></div><h3>Analyzing with AI...</h3></div></div>';
+
+  const evtSource = new EventSource(`${API}/api/insights/${id}/stream`);
+  let fullText = '';
+
+  evtSource.addEventListener('message', function(e) {
+    try {
+      const data = JSON.parse(e.data);
+      if (data.type === 'text') {
+        fullText += data.content;
+        el.innerHTML = `<div class="card">
+          <div class="card-header"><h3>AI Insights</h3></div>
+          <div class="insights-text">${escapeHtml(fullText)}<span class="cursor-blink">▌</span></div>
+        </div>`;
+      }
+    } catch (_) {}
+  });
+
+  evtSource.addEventListener('complete', function() {
+    evtSource.close();
+    el.innerHTML = `<div class="card">
+      <div class="card-header"><h3>AI Insights</h3></div>
+      <div class="insights-text">${escapeHtml(fullText)}</div>
+    </div>`;
+  });
+
+  evtSource.addEventListener('error', function() {
+    evtSource.close();
+    if (!fullText) {
+      el.innerHTML = `<div class="card">
+        <div class="card-header"><h3>AI Insights</h3></div>
+        <div class="empty-state"><h3>Not available</h3>
+        <p>AI summarizer may not be configured. Ensure --ai-endpoint is set.</p></div>
+      </div>`;
+    }
+  });
 }
 
 /* =============================================================

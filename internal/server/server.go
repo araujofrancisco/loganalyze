@@ -6,21 +6,37 @@ import (
 	"time"
 
 	"github.com/username/loganalyze/internal/session"
+	"github.com/username/loganalyze/internal/summarizer"
 	"github.com/username/loganalyze/internal/web"
 )
 
 type Server struct {
-	addr     string
-	dataDir  string
-	sessions *session.Store
+	addr       string
+	dataDir    string
+	sessions   *session.Store
+	summarizer summarizer.Summarizer
+	aiModel    string
 }
 
-func New(addr, dataDir string) *Server {
-	return &Server{
+type Option func(*Server)
+
+func WithSummarizer(s summarizer.Summarizer, model string) Option {
+	return func(srv *Server) {
+		srv.summarizer = s
+		srv.aiModel = model
+	}
+}
+
+func New(addr, dataDir string, opts ...Option) *Server {
+	srv := &Server{
 		addr:     addr,
 		dataDir:  dataDir,
 		sessions: session.NewStore(),
 	}
+	for _, opt := range opts {
+		opt(srv)
+	}
+	return srv
 }
 
 func (s *Server) Start() error {
@@ -34,6 +50,8 @@ func (s *Server) Start() error {
 	mux.HandleFunc("GET /api/sessions", s.handleListSessions)
 	mux.HandleFunc("DELETE /api/sessions/{id}", s.handleDeleteSession)
 	mux.HandleFunc("GET /api/uploaded/{id}", s.handleRawUpload)
+	mux.HandleFunc("GET /api/insights/{id}", s.handleInsights)
+	mux.HandleFunc("GET /api/insights/{id}/stream", s.handleInsightsStream)
 	mux.HandleFunc("GET /health", s.handleHealth)
 
 	mux.Handle("GET /static/", http.FileServer(http.FS(web.StaticFS)))
