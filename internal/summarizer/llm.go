@@ -200,7 +200,7 @@ func (l *llm) SummarizeStream(ctx context.Context, req SummaryRequest) (<-chan s
 		}
 
 		scanner := bufio.NewScanner(resp.Body)
-		for scanner.Scan() {
+			for scanner.Scan() {
 			line := scanner.Text()
 			if !strings.HasPrefix(line, "data: ") {
 				continue
@@ -228,6 +228,14 @@ func (l *llm) SummarizeStream(ctx context.Context, req SummaryRequest) (<-chan s
 				}
 			}
 		}
+
+				// Check for scanner errors
+				if err := scanner.Err(); err != nil {
+					select {
+					case ch <- fmt.Sprintf("error: scanner: %v", err):
+					case <-ctx.Done():
+					}
+				}
 	}()
 
 	return ch, nil
