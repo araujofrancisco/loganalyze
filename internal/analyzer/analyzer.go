@@ -83,10 +83,17 @@ func Analyze(events <-chan model.Event, limit int) Report {
 
 type groupHeap []*Group
 
-func (h groupHeap) Len() int            { return len(h) }
-func (h groupHeap) Less(i, j int) bool  { return h[i].Count < h[j].Count }
-func (h groupHeap) Swap(i, j int)       { h[i], h[j] = h[j], h[i]; h[i].Index = i; h[j].Index = j }
-func (h *groupHeap) Push(x any)         { n := len(*h); g := x.(*Group); g.Index = n; *h = append(*h, g) }
-func (h *groupHeap) Pop() any           { old := *h; n := len(old); g := old[n-1]; g.Index = -1; *h = old[:n-1]; return g }
+func (h groupHeap) Len() int           { return len(h) }
+func (h groupHeap) Less(i, j int) bool { return h[i].Count < h[j].Count }
+func (h groupHeap) Swap(i, j int)      { h[i], h[j] = h[j], h[i]; h[i].Index = i; h[j].Index = j }
+func (h *groupHeap) Push(x any)        { n := len(*h); g := x.(*Group); g.Index = n; *h = append(*h, g) }
+func (h *groupHeap) Pop() any {
+	old := *h
+	n := len(old)
+	g := old[n-1]
+	g.Index = -1
+	*h = old[:n-1]
+	return g
+}
 
 var _ heap.Interface = (*groupHeap)(nil)

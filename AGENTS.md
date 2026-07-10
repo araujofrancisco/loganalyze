@@ -6,12 +6,12 @@
 - Color: `github.com/fatih/color`
 - Test: `testing` stdlib
 - Web UI: embedded vanilla HTML+JS via `//go:embed`
-- Docker: multi-stage build, alpine runtime
+- Docker: multi-stage build (golang:1.22 → alpine:3.20), ~7.6MB image
 
 ## Conventions
 - All business logic in `internal/` — never in `cmd/`
 - `cmd/` files only wire up flags and call internal functions
-- Streaming-first: process line-by-by, never load full file
+- Streaming-first: process line-by-line, never load full file
 - Errors returned, not logged; main.go is the only place that calls os.Exit
 - ANSI color codes via `fatih/color`, not raw escape sequences
 - Format detection is best-effort heuristic, no schema required
@@ -34,12 +34,6 @@ Server mode (serve command):
 
   Note: Normalizer is only called during the Analyzer grouping step, not per-line.
 
-## Testing
-- Unit tests in each internal package
-- Integration tests with testdata/samples/*.log
-- Run: `go test ./...`
-- Test logs live in testdata/samples/ — add new ones alongside new parsers
-
 ## Commands
 - `loganalyze scan <files...>` — full analysis report
 - `loganalyze errors <files...>` — error lines with context
@@ -51,7 +45,7 @@ Server mode (serve command):
 ## Data Model (internal/model/event.go)
   Event {
     Timestamp time.Time
-    Level     Level (Debug/Info/Warn/Error/Fatal)
+    Level     Level (Debug/Info/Warn/Error/Fatal) — serializes as JSON string via MarshalJSON/UnmarshalJSON
     Source    string  // filename or "stdin"
     Message   string  // extracted message text
     Raw       string  // original line
@@ -59,18 +53,33 @@ Server mode (serve command):
   }
 
 ## Normalization rules
-  Replace with <placeholder> tokens:
-  - UUIDs, IPv4/IPv6, numbers, hex, file paths, hashes, request IDs
+  Replace with <placeholder> tokens (in order):
+  - UUIDs, request IDs, IPv6, IPv4, hex, file paths, hashes (40+ hex chars), standalone numbers
   Used to group near-identical error lines
 
 ## API (server mode)
-  POST  /api/upload          upload log file → session_id
-  POST  /api/analyze/{id}    run analysis with options
-  GET   /api/results/{id}    get report (JSON)
-  GET   /api/status/{id}     SSE progress stream
-  GET   /api/sessions        list active sessions
-  DELETE /api/sessions/{id}  delete session
-  GET   /health              health check
+  POST  /api/upload              upload log file → session_id
+  POST  /api/analyze/{id}        run analysis with options
+  GET   /api/results/{id}        get report (JSON)
+  GET   /api/results/{id}/events paginated events (?offset=0&limit=100)
+  GET   /api/status/{id}         SSE progress stream
+  GET   /api/sessions            list active sessions
+  DELETE /api/sessions/{id}      delete session
+  GET   /api/uploaded/{id}       download original uploaded file
+  GET   /health                  health check
+
+## Web UI (internal/web/static/)
+  - SPA with 3 pages: Dashboard (#/), Upload (#/upload), Session (#/session/:id)
+  - Session detail: 3 tabs (Overview with SVG level chart, paginated Events, Raw file view)
+  - CSS design system with dark/light themes persisted to localStorage
+  - Keyboard shortcuts: ⌘1/Ctrl+1 → dashboard, ⌘U/Ctrl+U → upload
+  - Toast notifications, drag-and-drop upload, inline event filters
+
+## Testing
+- Unit tests in each internal package
+- Integration tests with testdata/samples/*.log
+- Run: `go test ./...`
+- Test logs live in testdata/samples/ — add new ones alongside new parsers
 
 ## Building
   go build -o loganalyze ./main.go

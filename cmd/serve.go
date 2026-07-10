@@ -8,8 +8,8 @@ import (
 )
 
 var (
-	flagAddr   string
-	flagData   string
+	flagAddr string
+	flagData string
 )
 
 var serveCmd = &cobra.Command{

@@ -1,22 +1,22 @@
 <!DOCTYPE html>
-<html lang="en">
+<html lang="en" data-theme="dark">
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <title>Log Analyzer</title>
+<meta name="description" content="Analyze log files — scan, grep, group errors, export reports.">
+<meta name="color-scheme" content="dark light">
 <link rel="stylesheet" href="/static/style.css">
+<script>
+(function(){
+  var stored = localStorage.getItem('theme');
+  var theme = stored || (window.matchMedia('(prefers-color-scheme:light)').matches ? 'light' : 'dark');
+  document.documentElement.setAttribute('data-theme', theme);
+})();
+</script>
 </head>
 <body>
-<div id="app">
-  <header>
-    <h1>Log Analyzer</h1>
-    <nav>
-      <a href="/" data-nav>Home</a>
-      <a href="/upload" data-nav>Upload</a>
-    </nav>
-  </header>
-  <main id="main"></main>
-</div>
-<script src="/static/app.js"></script>
+<div id="app"></div>
+<script type="module" src="/static/app.js"></script>
 </body>
 </html>

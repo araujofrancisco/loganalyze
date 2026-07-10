@@ -37,7 +37,7 @@ type sessionListResponse struct {
 }
 
 type resultsResponse struct {
-	Status string         `json:"status"`
-	Report *model.Report  `json:"report,omitempty"`
-	Events []model.Event  `json:"events,omitempty"`
+	Status string        `json:"status"`
+	Report *model.Report `json:"report,omitempty"`
+	Events []model.Event `json:"events,omitempty"`
 }

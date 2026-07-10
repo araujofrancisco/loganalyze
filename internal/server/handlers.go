@@ -107,13 +107,12 @@ func (s *Server) handleResults(w http.ResponseWriter, r *http.Request) {
 	}
 
 	resp := map[string]interface{}{
-		"status": ses.Status,
+		"status":  ses.Status,
+		"command": ses.Config.Command,
 	}
 	if ses.Status == "complete" {
 		resp["report"] = ses.Report
-		if ses.Events == nil {
-			resp["events"] = []model.Event{}
-		} else {
+		if ses.Events != nil {
 			resp["events"] = ses.Events
 		}
 	}
@@ -201,6 +200,84 @@ func (s *Server) handleDeleteSession(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]bool{"deleted": true})
 }
 
+func (s *Server) handleEvents(w http.ResponseWriter, r *http.Request) {
+	ses := s.getSession(w, r)
+	if ses == nil {
+		return
+	}
+
+	if ses.Status != "complete" || ses.Events == nil {
+		writeJSON(w, http.StatusOK, map[string]interface{}{
+			"events": []model.Event{},
+			"total":  0,
+			"offset": 0,
+			"limit":  0,
+		})
+		return
+	}
+
+	offset := 0
+	limit := 100
+	if o := r.URL.Query().Get("offset"); o != "" {
+		if v, err := parseInt(o); err == nil && v >= 0 {
+			offset = v
+		}
+	}
+	if l := r.URL.Query().Get("limit"); l != "" {
+		if v, err := parseInt(l); err == nil && v > 0 && v <= 1000 {
+			limit = v
+		}
+	}
+
+	total := len(ses.Events)
+	if offset >= total {
+		writeJSON(w, http.StatusOK, map[string]interface{}{
+			"events": []model.Event{},
+			"total":  total,
+			"offset": offset,
+			"limit":  limit,
+		})
+		return
+	}
+
+	end := offset + limit
+	if end > total {
+		end = total
+	}
+
+	writeJSON(w, http.StatusOK, map[string]interface{}{
+		"events": ses.Events[offset:end],
+		"total":  total,
+		"offset": offset,
+		"limit":  limit,
+	})
+}
+
+func (s *Server) handleRawUpload(w http.ResponseWriter, r *http.Request) {
+	ses := s.getSession(w, r)
+	if ses == nil {
+		return
+	}
+	data, err := os.ReadFile(ses.FilePath)
+	if err != nil {
+		http.Error(w, "file not found", http.StatusNotFound)
+		return
+	}
+	w.Header().Set("Content-Type", "text/plain; charset=utf-8")
+	w.Write(data)
+}
+
+func parseInt(s string) (int, error) {
+	var n int
+	for _, c := range s {
+		if c < '0' || c > '9' {
+			return 0, fmt.Errorf("not a number")
+		}
+		n = n*10 + int(c-'0')
+	}
+	return n, nil
+}
+
 func (s *Server) handleHealth(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]string{"status": "ok"})
 }
@@ -221,23 +298,31 @@ func (s *Server) getSession(w http.ResponseWriter, r *http.Request) *session.Ses
 
 func (s *Server) runAnalysis(ses *session.Session) {
 	cfg := buildFilterConfig(ses.Config)
+
+	if _, err := os.Stat(ses.FilePath); os.IsNotExist(err) {
+		ses.SetError("uploaded file not found")
+		return
+	}
+
 	lines := reader.ReadLines([]string{ses.FilePath}, false)
 
 	eventCh := make(chan model.Event, 1000)
 	go func() {
 		defer close(eventCh)
-		lineCount := 0
+		parsedCount := 0
+		matchCount := 0
 		for line := range lines {
+			parsedCount++
 			evt := parser.ParseLine(line.Text, line.Line, line.Source)
 			if filter.Matches(evt, cfg) {
-				lineCount++
-				if lineCount%1000 == 0 {
-					ses.SetProgress(fmt.Sprintf("parsed %d lines", lineCount))
+				matchCount++
+				if parsedCount%1000 == 0 {
+					ses.SetProgress(fmt.Sprintf("parsed %d lines, %d matches", parsedCount, matchCount))
 				}
 				eventCh <- evt
 			}
 		}
-		ses.SetProgress(fmt.Sprintf("parsing complete: %d events", lineCount))
+		ses.SetProgress(fmt.Sprintf("parsing complete: %d lines, %d matches", parsedCount, matchCount))
 	}()
 
 	switch ses.Config.Command {

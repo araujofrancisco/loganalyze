@@ -11,11 +11,11 @@ import (
 )
 
 type jsonReport struct {
-	Source     string          `json:"source"`
-	TotalLines int             `json:"total_lines"`
-	TimeRange  *jsonTimeRange   `json:"time_range,omitempty"`
-	Levels     map[string]int  `json:"levels"`
-	TopErrors  []jsonGroup     `json:"top_errors,omitempty"`
+	Source     string         `json:"source"`
+	TotalLines int            `json:"total_lines"`
+	TimeRange  *jsonTimeRange `json:"time_range,omitempty"`
+	Levels     map[string]int `json:"levels"`
+	TopErrors  []jsonGroup    `json:"top_errors,omitempty"`
 }
 
 type jsonTimeRange struct {

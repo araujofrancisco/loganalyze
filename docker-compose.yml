@@ -1,9 +1,10 @@
-version: "3.9"
 services:
   loganalyze:
     build: .
     ports:
-      - "8080:8080"
+      - "8081:8080"
+    environment:
+      - TZ=UTC
     volumes:
       - logdata:/data
     restart: unless-stopped

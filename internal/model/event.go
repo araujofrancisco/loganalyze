@@ -33,6 +33,24 @@ func (l Level) String() string {
 	}
 }
 
+func (l Level) MarshalJSON() ([]byte, error) {
+	return json.Marshal(l.String())
+}
+
+func (l *Level) UnmarshalJSON(data []byte) error {
+	var s string
+	if err := json.Unmarshal(data, &s); err != nil {
+		return err
+	}
+	parsed, ok := ParseLevel(s)
+	if !ok {
+		*l = LevelInfo
+		return nil
+	}
+	*l = parsed
+	return nil
+}
+
 var levelAliases = map[string]Level{
 	"FATAL":    LevelFatal,
 	"CRITICAL": LevelFatal,
@@ -93,13 +111,13 @@ type Group struct {
 }
 
 type Report struct {
-	Source     string        `json:"source"`
-	TotalLines int           `json:"total_lines"`
-	Levels     map[Level]int `json:"-"`
+	Source     string         `json:"source"`
+	TotalLines int            `json:"total_lines"`
+	Levels     map[Level]int  `json:"-"`
 	LevelsStr  map[string]int `json:"levels"`
-	TopErrors  []Group       `json:"top_errors,omitempty"`
-	FirstLine  time.Time     `json:"first_line"`
-	LastLine   time.Time     `json:"last_line"`
+	TopErrors  []Group        `json:"top_errors,omitempty"`
+	FirstLine  time.Time      `json:"first_line"`
+	LastLine   time.Time      `json:"last_line"`
 }
 
 func (r *Report) MarshalJSON() ([]byte, error) {
@@ -113,12 +131,12 @@ func (r *Report) MarshalJSON() ([]byte, error) {
 
 func (r *Report) UnmarshalJSON(data []byte) error {
 	type Alias struct {
-		Levels    map[string]int `json:"levels"`
-		Source    string        `json:"source"`
-		TotalLines int          `json:"total_lines"`
-		TopErrors []Group       `json:"top_errors"`
-		FirstLine time.Time     `json:"first_line"`
-		LastLine  time.Time     `json:"last_line"`
+		Levels     map[string]int `json:"levels"`
+		Source     string         `json:"source"`
+		TotalLines int            `json:"total_lines"`
+		TopErrors  []Group        `json:"top_errors"`
+		FirstLine  time.Time      `json:"first_line"`
+		LastLine   time.Time      `json:"last_line"`
 	}
 	var a Alias
 	if err := json.Unmarshal(data, &a); err != nil {

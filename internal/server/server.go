@@ -29,12 +29,14 @@ func (s *Server) Start() error {
 	mux.HandleFunc("POST /api/upload", s.handleUpload)
 	mux.HandleFunc("POST /api/analyze/{id}", s.handleAnalyze)
 	mux.HandleFunc("GET /api/results/{id}", s.handleResults)
+	mux.HandleFunc("GET /api/results/{id}/events", s.handleEvents)
 	mux.HandleFunc("GET /api/status/{id}", s.handleStatus)
 	mux.HandleFunc("GET /api/sessions", s.handleListSessions)
 	mux.HandleFunc("DELETE /api/sessions/{id}", s.handleDeleteSession)
+	mux.HandleFunc("GET /api/uploaded/{id}", s.handleRawUpload)
 	mux.HandleFunc("GET /health", s.handleHealth)
 
-	mux.Handle("GET /static/", http.StripPrefix("/static/", http.FileServer(http.FS(web.StaticFS))))
+	mux.Handle("GET /static/", http.FileServer(http.FS(web.StaticFS)))
 	mux.HandleFunc("GET /", func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path != "/" {
 			http.NotFound(w, r)

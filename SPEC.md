@@ -1,447 +1,633 @@
-# Log Analyzer — Specification
-
-## Overview
-
-A CLI tool that reads one or more log files and answers: *what's failing, when, how often, and where?*
-
-Binary name: `loganalyze`
-
-Normalizer is **not** called per-line in the pipeline. It is invoked only inside the Analyzer during the grouping step, operating on the already-parsed `Message` field.
+# Log Analyzer — Technical Specification
 
 ---
 
-## CLI Interface
+## Table of Contents
 
-### Commands
-
-#### `loganalyze scan [files...]`
-
-Full analysis report of all log files.
-
-```
-loganalyze scan app.log
-loganalyze scan /var/log/*.log --level error --json
-```
-
-Output: summary table with total lines, level breakdown, top recurring errors, time range, and first/last occurrence.
-
-#### `loganalyze errors [files...]`
-
-Filter and display only error-level lines with context.
-
-```
-loganalyze errors app.log --since 1h
-loganalyze errors syslog --level fatal --no-color
-```
-
-Output: one error line per row with level badge, timestamp, source, and message.
-
-#### `loganalyze top [files...]`
-
-Show top N most frequent error patterns (normalized and grouped).
-
-```
-loganalyze top app.log --limit 20
-loganalyze top *.log --json
-```
-
-Output: ranked list of signatures with count and time range.
-
-#### `loganalyze grep [files...] <pattern>`
-
-Regex search with match highlighting.
-
-```
-loganalyze grep app.log "timeout|refused|panic"
-loganalyze grep /var/log/*.log "5[0-9][0-9]" --no-color
-```
-
-Output: matching lines with level badge and matched term highlighted.
+1. [Architecture Overview](#1-architecture-overview)
+2. [Data Model](#2-data-model)
+3. [Core Interfaces](#3-core-interfaces)
+4. [Streaming Pipeline](#4-streaming-pipeline)
+5. [Normalization Engine](#5-normalization-engine)
+6. [Analyzer Implementation](#6-analyzer-implementation)
+7. [Server API](#7-server-api)
+8. [Web UI Architecture](#8-web-ui-architecture)
+9. [Docker Deployment](#9-docker-deployment)
+10. [Testing Strategy](#10-testing-strategy)
 
 ---
 
-### Global Flags
+## 1. Architecture Overview
 
-| Flag | Type | Default | Description |
-|---|---|---|---|
-| `--since` | duration | - | Relative time filter (e.g. `1h`, `30m`, `24h`) |
-| `--until` | timestamp | - | Absolute end time (RFC 3339) |
-| `--level` | string | `""` | Minimum level: debug, info, warn, error, fatal |
-| `--json` | bool | false | Output as JSON |
-| `--csv` | bool | false | Output as CSV |
-| `--no-color` | bool | false | Disable ANSI color output |
-| `--limit` | int | 10 | Max results (top errors, grep matches) |
+```
+┌─────────────────────────────────────────────────────────┐
+│                      main.go                            │
+│  cobra.Command tree: root, scan, errors, top, grep,    │
+│  serve                                                  │
+└──────────┬──────────────────────────────────────────────┘
+           │
+     ┌─────┴───────┬──────────────────────────────┐
+     │             │                              │
+     ▼             ▼                              ▼
+┌──────────┐  ┌──────────┐                 ┌──────────┐
+│ CLI mode │  │ Serve    │                 │ Shared   │
+│          │  │ mode     │                 │ Flags    │
+│ scan,    │  │ HTTP     │                 │ --since  │
+│ errors,  │  │ server   │                 │ --until  │
+│ top,     │  │ with web │                 │ --level  │
+│ grep     │  │ UI       │                 │ --json   │
+└──────────┘  └──────────┘                 │ --csv    │
+                                           │ --no-col │
+                                           │ --limit  │
+                                           └──────────┘
+```
 
-`--since` and `--until` are relative to the current time when `--since` is a duration, or absolute when a timestamp.
-
----
-
-### Exit Codes
-
-| Code | Meaning |
-|---|---|
-| 0 | Success |
-| 1 | General error (bad flags, read failure) |
-| 2 | Partial failure (≥1 file succeeded, ≥1 failed) |
-| 130 | Interrupted by SIGINT/SIGTERM |
-
----
-
-### Input
-
-#### Sources (in priority order)
-
-1. **File paths** — one or more paths, expanded via shell glob
-2. **Standard input** — when no files given or `-` is passed
-3. **Glob patterns** — paths containing `*`, `?`, `[...]` are expanded
-
-#### Binary detection
-
-Files with a null byte in the first 8192 bytes are skipped with a warning.
-
-#### Encoding
-
-Assumes UTF-8. Non-UTF-8 bytes are preserved in raw output but may be replaced with `�` in structured fields.
-
-#### Future phase: Gzip support
-
-Files ending in `.gz` will be transparently decompressed using `compress/gzip`. Not in MVP.
+Both modes share the same streaming pipeline from `internal/` — no code duplication.
 
 ---
 
-## Data Model
+## 2. Data Model
 
-### `Event`
+### Location: `internal/model/event.go`
 
 ```go
-type Event struct {
-    Timestamp time.Time   // extracted or zero-value
-    Level     Level
-    Source    string      // filename or "stdin"
-    Message   string      // extracted message
-    Raw       string      // original line
-    LineNum   int         // 1-based
-}
-```
-
-### `Level`
-
-```go
-type Level int8
-
 const (
-    LevelDebug Level = -1
-    LevelInfo  Level = 0
-    LevelWarn  Level = 1
-    LevelError Level = 2
-    LevelFatal Level = 3
+    LevelFatal Level = iota  // 0 — highest severity
+    LevelError               // 1
+    LevelWarn                // 2
+    LevelInfo                // 3
+    LevelDebug               // 4 — lowest severity
 )
 ```
 
-Level detection: case-insensitive word-boundary match. First recognized keyword on the line wins, searched in order: Fatal > Error > Warn > Info > Debug.
+**Level ordering:** numeric value defines severity (`LevelFatal` = highest). Filters check `evt.Level >= cfg.MinLevel` where the comparison operator means "at least as severe as" (since lower numeric value = higher severity).
 
-### Level aliases
-
-| Canonical | Aliases |
-|---|---|
-| LevelFatal | FATAL, CRITICAL, PANIC |
-| LevelError | ERROR |
-| LevelWarn | WARN, WARNING |
-| LevelInfo | INFO |
-| LevelDebug | DEBUG, TRACE |
-
-### `Group`
+**JSON serialization:** Level implements `json.Marshaler` and `json.Unmarshaler` to serialize as uppercase strings (`"ERROR"`, `"INFO"`).
 
 ```go
-type Group struct {
-    Signature     string    // normalized message
-    SampleMessage string    // first raw message seen
-    Count         int
-    FirstSeen     time.Time
-    LastSeen      time.Time
+func (l Level) MarshalJSON() ([]byte, error) {
+    return json.Marshal(l.String())
 }
-```
-
----
-
-## Parsing
-
-### Timestamp detection (in priority order)
-
-| Pattern | Example | Regex |
-|---|---|---|
-| ISO 8601 / RFC 3339 | `2026-07-08T10:12:33Z` | `\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(\.\d+)?(Z\|[+-]\d{2}:?\d{2})?` |
-| ISO 8601 date + time | `2026-07-08 10:12:33` | `\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}` |
-| Syslog (BSD) | `Jul  8 10:12:33` | `(Jan\|Feb\|...)\s+\d{1,2}\s+\d{2}:\d{2}:\d{2}` |
-| Apache CLF | `08/Jul/2026:10:12:33 +0000` | `\d{2}/(Jan\|Feb\|...)/\d{4}:\d{2}:\d{2}:\d{2} \+\d{4}` |
-| Unix epoch seconds | `1720421553` | `^\d{10}` |
-
-Each pattern is tried in order. First match wins. If no pattern matches, `Timestamp` is zero-value.
-
-#### Syslog year resolution
-
-Syslog lines (`Jul  8 10:12:33`) lack a year. The parser:
-1. Uses the current year at runtime
-2. If the resulting timestamp is in the future, subtracts 1 year
-3. If file modification time is available (not stdin), prefers its year
-
-### Message extraction
-
-1. Strip the detected timestamp prefix (if any) from the line
-2. Strip the detected level token from what remains
-3. Strip leading/trailing whitespace from what remains
-4. If nothing remains, use the whole raw line
-
-**Guarantee:** `Message` NEVER contains the detected timestamp or level token. This is critical for normalizer correctness — without it, timestamp numbers pollute the grouping signature.
-
----
-
-## Filtering
-
-All active filters AND together:
-
-- **Level filter:** `evt.Level >= cfg.MinLevel`
-- **Regex filter:** `cfg.Regex.MatchString(evt.Raw)` (notably on raw line, not parsed message)
-- **Time range:** if `evt.Timestamp` is non-zero and since/until are set, check `cfg.Since <= evt.Timestamp <= cfg.Until`
-
----
-
-## Normalization
-
-Used to group near-identical error lines into signatures.
-
-### Replacement rules (applied in order)
-
-| Pattern | Replace With | Example |
-|---|---|---|
-| UUID | `<uuid>` | `550e8400-e29b-41d4-a716-446655440000` |
-| IPv4 | `<ip>` | `192.168.1.1` |
-| IPv6 | `<ip>` | `::1` |
-| Numbers (standalone) | `<n>` | `timeout after 30s` → `timeout after <n>s` |
-| Hex numbers | `<hex>` | `error 0xdeadbeef` |
-| File paths | `<path>` | `/var/log/app.log:123` |
-| Hashes (40+ hex chars) | `<hash>` | `commit abc123def456...` |
-| Unix timestamps (10-digit) | `<n>` | `logged in at 1720421553` |
-
-Normalization is applied to the **Message** field, not Raw. The Message field MUST have timestamp and level tokens already stripped (see Message extraction guarantee).
-
-### Precondition
-
-Normalization is called ONLY during the Analyzer grouping step, on events at LevelError and above. It is never called per-line in the streaming pipeline.
-
-### Replacement order (specific → general)
-
-1. UUIDs → `<uuid>`
-2. Request IDs → `<req>` (patterns: `req-[a-zA-Z0-9]+`, `trace=[a-z0-9]+`)
-3. IPv6 → `<ip>`
-4. IPv4 → `<ip>`
-5. Hex numbers → `<hex>` (0x prefix)
-6. File paths → `<path>`
-7. Hashes (≥40 hex chars) → `<hash>`
-8. Numbers → `<n>` (regex `\b\d+\b` — word-boundary match)
-
-Order is critical: UUIDs are matched before hex/hashes, and IPs before general numbers.
-
----
-
-## Analysis
-
-### `Report` structure
-
-```go
-type Report struct {
-    Source     string            // filename or "stdin"
-    TotalLines int
-    Levels     map[Level]int     // count per level
-    TopErrors  []Group           // sorted by count desc, limited
-    FirstLine  time.Time
-    LastLine   time.Time
-    Duration   time.Duration
-}
-```
-
-### Grouping behavior
-
-- Only events at `LevelError` and above are grouped
-- Normalize the Message field to produce a signature
-- Events with matching signatures are merged: count++, update LastSeen
-- FirstSeen is set on first encounter and never overwritten
-- After all events are processed, groups are sorted by Count descending
-
-### Top-K algorithm
-
-Groups are stored in a fixed-capacity min-heap of size `--limit`:
-- Seen-before signature → increment count, fix heap position
-- New signature, heap not full → push with count=1
-- New signature, heap full → if count(1) > min(heap), pop-min and push-new
-
-This is a standard streaming top-K approximation. Practically correct for all realistic log distributions.
-
-### Memory guarantees
-
-- Level counters: fixed small map
-- Error groups: bounded by `--limit` (min-heap, see Top-K algorithm above)
-- No event list stored — fully streaming
-- Exception: `errors`/`grep` output is streaming (NDJSON), never buffered
-
----
-
-## Output
-
-### Console (default)
-
-Uses `text/tabwriter` for aligned columns, `fatih/color` for ANSI coloring.
-
-**`scan` output:**
-```
-File: app.log
-Total lines: 15,342
-Time range:  2026-07-08 08:01:12 — 2026-07-08 17:45:33 (9h44m)
-
-Level     Count      %
-──────────────────────────────
-ERROR       342    2.2%
-WARN        891    5.8%
-INFO      14,109   91.9%
-
-Top errors:
- 1. database connection timeout after <n>s     47x  [10:12 - 14:33]
- 2. request failed: POST /api/users <n>        23x  [11:04 - 13:12]
- 3. memory usage at <n>%, gc triggered         12x  [09:30 - 15:01]
-```
-
-**Color rules:**
-
-| Level | Color |
-|---|---|
-| FATAL | White on red background |
-| ERROR | Red bold |
-| WARN | Yellow bold |
-| INFO | Cyan |
-| DEBUG | Dim white |
-
-Grep matches: yellow background underline on matched portion.
-
-### JSON output (`--json`)
-
-```json
-{
-  "source": "app.log",
-  "total_lines": 15342,
-  "time_range": {
-    "first": "2026-07-08T08:01:12Z",
-    "last": "2026-07-08T17:45:33Z",
-    "duration_sec": 35061
-  },
-  "levels": {
-    "debug": 0,
-    "info": 14109,
-    "warn": 891,
-    "error": 342,
-    "fatal": 0
-  },
-  "top_errors": [
-    {
-      "signature": "database connection timeout after <n>s",
-      "sample": "database connection timeout after 30s",
-      "count": 47,
-      "first_seen": "2026-07-08T10:12:33Z",
-      "last_seen": "2026-07-08T14:33:12Z"
+func (l *Level) UnmarshalJSON(b []byte) error {
+    var s string
+    if err := json.Unmarshal(b, &s); err != nil {
+        return err
     }
-  ]
+    *l = levelFromString(s)
+    return nil
 }
 ```
 
-For `errors` and `grep` commands with `--json`: output is **JSON Lines (NDJSON)** — one JSON object per line, LF-terminated. This preserves the streaming guarantee.
+This is required for the Web UI's JSON responses — the frontend expects Level as strings, not integers.
 
-```
-{"timestamp":"2026-07-08T10:12:33Z","level":"error","source":"app.log","message":"timeout","line":42}
-{"timestamp":"2026-07-08T10:12:34Z","level":"error","source":"app.log","message":"refused","line":43}
-```
+### Key structs
 
-For `scan` with `--json`: output is a single pretty-printed JSON object (the Report). This is safe because the Report is small by construction.
+```go
+type Event struct {
+    Timestamp time.Time `json:"timestamp,omitempty"`
+    Level     Level     `json:"level"`
+    Source    string    `json:"source"`     // filename or "stdin"
+    Message   string    `json:"message"`    // extracted message
+    Raw       string    `json:"raw"`        // original line
+    LineNum   int       `json:"line_num"`
+}
 
-### CSV output (`--csv`)
+type Group struct {
+    Signature string   `json:"signature"`  // normalized message
+    Count     int      `json:"count"`
+    FirstSeen string   `json:"first_seen"` // ISO 8601
+    LastSeen  string   `json:"last_seen"`
+    Sample    string   `json:"sample"`     // first raw error line
+}
 
-For `scan`:
-```
-level,count,pct
-ERROR,342,2.23
-WARN,891,5.81
-INFO,14109,91.96
-```
+type Report struct {
+    Filename    string            `json:"filename"`
+    TotalLines  int               `json:"total_lines"`
+    LevelCounts map[string]int    `json:"level_counts"`
+    Errors      []Group           `json:"errors,omitempty"`
+    Events      []Event           `json:"events,omitempty"`
+    StartTime   string            `json:"start_time,omitempty"`  // min timestamp
+    EndTime     string            `json:"end_time,omitempty"`    // max timestamp
+    Duration    string            `json:"duration,omitempty"`    // human duration
+    Command     string            `json:"command,omitempty"`     // "scan", "errors", "top", "grep"
 
-For `errors`/`grep`:
-```
-timestamp,level,source,message
-2026-07-08T10:12:33Z,error,app.log,database connection timeout after 30s
+    // Internal: not serialized
+    matchedEvents []Event         // populated for errors/grep commands; nil for scan/top
+}
 ```
 
 ---
 
-## Error Handling
+## 3. Core Interfaces
 
-- **Bad flags:** print usage to stderr, exit 1
-- **File not found:** print warning to stderr, continue with remaining files
-- **Permission denied:** print warning to stderr, continue
-- **Binary file:** skip with warning, continue
-- **Empty file:** treat as valid input with 0 lines
-- **No input files and no stdin pipe:** print usage to stderr, exit 1
+Every package defines a single exported function (not an interface):
 
-### Output discipline
+| Package | Signatures | Purpose |
+|---|---|---|
+| `reader.ReadLines` | `(io.Reader, int) → chan Line` | Read line-by-line with line numbers |
+| `parser.ParseLine` | `(int, string, string) → *Event` | Extract level, timestamp, message |
+| `normalizer.Normalize` | `(string) → string` | Replace IDs/paths with tokens |
+| `filter.ShouldKeep` | `(*Event, *Config) → bool` | Level/time/regex filter |
+| `analyzer.Analyze` | `(chan *Event, *Config) → *Report` | Streaming analysis |
+| `renderer.Render*` | `(*Report, io.Writer)` | Console/JSON/CSV output |
 
-- All diagnostic/warning messages → stderr (never stdout)
-- Only the requested output format (console/JSON/CSV) → stdout
-- This invariant is maintained regardless of partial failures
+---
+
+## 4. Streaming Pipeline
+
+### Input discovery — `reader.ReadLines`
+
+```go
+func ReadLines(r io.Reader, fileThreshold int) chan Line
+```
+
+- Determines if source is file vs stdin via size hint / `os.Stdin.Stat()`
+- For files: reads line-by-line via `bufio.Scanner`
+- For stdin: reads all bytes then splits lines (stdin pipes don't report size)
+- Returns lines on a channel; closing the channel signals EOF
+- Binary detection: reads first 8 KB, checks for null byte (`\x00`) — if found, logs warning and skips processing but still reports line count
+
+### Parser — `parser.ParseLine`
+
+```go
+func ParseLine(lineNum int, line, source string) *Event
+```
+
+- Returns `*Event` or `nil` if line cannot be parsed
+- Finds first timestamp using ordered regex patterns, parses to UTC
+- Finds level keyword using ordered match (FATAL → ERROR → WARN → INFO → DEBUG)
+- Extracts message (everything after timestamp; or after level keyword; or entire line)
+
+### Filter — `filter.ShouldKeep`
+
+```go
+func ShouldKeep(evt *Event, cfg *Config) bool
+```
+
+- Level: `evt.Level >= cfg.MinLevel` (lower number = more severe)
+- Regex: `cfg.Regex.MatchString(evt.Raw)`
+- Time: start/end time bounds (zero-value = no filter)
+- All conditions must pass (AND logic)
+- Events without timestamps pass time filters
+
+### Analyzer — `analyzer.Analyze`
+
+```go
+func Analyze(events chan *Event, cfg *Config) *Report
+```
+
+Counts all events by level; for error-level events, normalizes message and tracks top-K groups via min-heap.
+
+---
+
+## 5. Normalization Engine
+
+### Location: `internal/normalizer/normalizer.go`
+
+**Purpose:** Convert error lines to a canonical form so near-identical errors collapse into one group.
+
+### Replacement order and patterns
+
+| Step | Pattern | Replacement | Example |
+|---|---|---|---|
+| 1 | UUID | `<uuid>` | `a1b2c3d4-...` → `<uuid>` |
+| 2 | Request ID | `<req>` | `req_abc123`, `rid:xyz` |
+| 3 | IPv6 | `<ip>` | `2001:db8::1` → `<ip>` |
+| 4 | IPv4 | `<ip>` | `10.0.0.5` → `<ip>` |
+| 5 | Hex | `<hex>` | `0xabcd1234` → `<hex>` |
+| 6 | File path | `<path>` | `/var/log/app.log` → `<path>` |
+| 7 | Hash | `<hash>` | `da39a3ee5e6b4b0d...` → `<hash>` |
+| 8 | Number | `<n>` | `5432`, `342`, `10.5` → `<n>` |
+
+### Design decisions
+
+- **Order matters:** applying UUID before number prevents UUIDs from being partially matched as hex/numbers. Applying file paths before numbers prevents path components (like line numbers) from being consumed separately.
+- **Only error-level:** normalization is gated on `LevelError` and above. Non-error events are never normalized — they pass through to the event channel untouched.
+- **Boundary respect:** all patterns use `\b` word boundaries to avoid matching inside words (e.g., `v1` stays as-is, `log4j` stays as-is).
+
+---
+
+## 6. Analyzer Implementation
+
+### Location: `internal/analyzer/analyzer.go`
+
+### Event counting
+
+```go
+counts := make(map[string]int)
+for evt := range events {
+    counts[evt.Level.String()]++
+}
+```
+
+### Top-K error grouping
+
+Uses a **min-heap** (`container/heap`) bounded to `cfg.Limit`:
+
+```go
+h := &GroupHeap{}
+for evt := range events {
+    if evt.Level >= model.LevelError {  // only group errors
+        sig := normalizer.Normalize(evt.Message)
+        if existing := h.Find(sig); existing != nil {
+            existing.Count++
+            existing.LastSeen = evt.Timestamp
+        } else {
+            heap.Push(h, &model.Group{
+                Signature: sig,
+                Count:     1,
+                FirstSeen: evt.Timestamp,
+                LastSeen:  evt.Timestamp,
+                Sample:    evt.Raw,
+            })
+        }
+    }
+}
+// Trim to limit if over
+if h.Len() > cfg.Limit {
+    for h.Len() > cfg.Limit {
+        heap.Pop(h)
+    }
+}
+```
+
+### Find operation
+
+`GroupHeap.Find` is O(n) linear scan with `Limit` items — acceptable for `Limit` ≤ `1000`. Each error event triggers a normalized key + linear scan.
+
+### Design decisions
+
+- **Min-heap, not max-heap:** pops the smallest count when full; the surviving groups have the highest counts. Sorted by Count (ascending) in heap order.
+- **No deduplication during counting:** level counts include `FATAL`, `ERROR`, `WARN`, `INFO`, `DEBUG` regardless of grouping.
+- **Events go to two places:** events are always added to `Report.Events` (for errors/grep commands); only error-level events also update the heap.
+
+---
+
+## 7. Server API
+
+### Location: `internal/server/handlers.go`, `internal/server/server.go`
+
+### Session management — `internal/session/session.go`
+
+- In-memory `sync.Map` keyed by UUID
+- Configurable cleanup interval (default 1 minute)
+- TTL per session: 1 hour since last access
+- Cleanup runs in a background goroutine
+
+### Endpoints
+
+#### `POST /api/upload`
+
+- Accepts multipart form with field `file`
+- Max file size: 100 MB (configurable via `http.MaxBytesReader`)
+- Copies file to `{dataDir}/{sessionID}.log`
+- Returns JSON: `{"session_id": "uuid","filename": "original.log","size": 12345}`
+
+#### `POST /api/analyze/{id}`
+
+- Body: `{"command":"scan","level":"error","regex":"","limit":10,"since":"","until":""}`
+- Validates session exists, checks for existing analysis
+- Launches analysis in a background goroutine
+- Returns 202 with `{"status":"started","session_id":"..."}`
+- Stores results in session on completion
+- `command` field determines analysis mode: `scan` (no events list), `errors` (error-level events), `top` (grouped errors only), `grep` (all events)
+
+#### `GET /api/results/{id}`
+
+- Returns full `Report` as JSON with all events included
+- Includes `command` field in response
+- Returns 404 if session not found or analysis not complete
+- Returns 409 if session was deleted
+
+#### `GET /api/results/{id}/events`
+
+- Query params: `offset` (default 0), `limit` (default 100, max 1000)
+- Returns paginated events with total count, offset, and limit
+- Response shape: `{"events":[...],"total":342,"offset":0,"limit":100}`
+- Events are sorted by line number
+- Returns 404 if session/analysis not found, or 400 if the command type has no events (scan/top return zero events)
+
+#### `GET /api/status/{id}`
+
+- Server-Sent Events stream: `{"phase":"reading|parsing|analyzing|done","progress":50,"total":100}`
+- Phase transitions: `reading` → `parsing` → `analyzing` → `done`
+- Sent every 500ms or on phase change, whichever is sooner
+
+#### `GET /api/sessions`
+
+- Lists all active sessions with metadata (filename, size, command, status, created_at)
+- Response: `{"sessions":[...]}`
+
+#### `DELETE /api/sessions/{id}`
+
+- Deletes session and uploaded file from disk
+- Returns 204 No Content
+- Idempotent (missing file is not an error)
+
+#### `GET /api/uploaded/{id}`
+
+- Returns the raw uploaded file as `application/octet-stream`
+- Useful for viewing the original file content in the Web UI's Raw tab
+- Returns 404 if session not found
+
+#### `GET /health`
+
+- Returns `{"status":"ok","timestamp":"..."}`
+
+### Router
+
+Uses `http.ServeMux` (Go 1.22+ method-based routing):
+
+```go
+mux := http.NewServeMux()
+mux.HandleFunc("POST /api/upload", ...)
+mux.HandleFunc("POST /api/analyze/{id}", ...)
+mux.HandleFunc("GET /api/results/{id}", ...)
+mux.HandleFunc("GET /api/results/{id}/events", ...)  // Go 1.22+ path prefix match
+mux.HandleFunc("GET /api/status/{id}", ...)
+mux.HandleFunc("GET /api/sessions", ...)
+mux.HandleFunc("DELETE /api/sessions/{id}", ...)
+mux.HandleFunc("GET /api/uploaded/{id}", ...)
+mux.HandleFunc("GET /health", ...)
+```
+
+Static files are served via `//go:embed` using:
+
+```go
+mux.Handle("/", http.FileServer(http.FS(webFS)))
+```
+
+Note: `http.StripPrefix` is NOT used — the embedded `static/` directory is structured so the file server serves `index.html` at root and all other assets at their relative paths.
+
+### Middleware
+
+- **CORS:** sets `Access-Control-Allow-Origin: *` and related headers on all API routes
+- **Content-Type:** enforces JSON content type for `POST` requests to `/api/analyze`
+- **Logging:** logs method, path, status, and duration to stderr
+- **Recovery:** catches panics, returns 500, logs stack trace
+- **Cleanup:** background goroutine removes expired sessions every 60s
 
 ### Signal handling
 
-On SIGINT/SIGTERM:
-- `scan` mode: print partial report collected so far, then exit 130
-- `errors`/`grep` mode: flush buffered output, then exit 130
-- `top` mode: print partial top-N list, then exit 130
+```go
+sig := make(chan os.Signal, 1)
+signal.Notify(sig, syscall.SIGINT, syscall.SIGTERM)
+<-sig
+```
+
+Graceful shutdown: stop HTTP server, cancel contexts, wait for active analyses to finish (with 30s timeout).
 
 ---
 
-## Performance Targets
+## 8. Web UI Architecture
 
-- **1 GB log file:** process in under 30 seconds on modern hardware
-- **Memory:** under 100 MB for any file size (streaming; no `[]Event` accumulation)
-- **Startup:** under 100ms to first output line
-- **Throughput:** 50,000+ lines/second per core
+### Location: `internal/web/static/`
+
+### Stack
+
+- **HTML:** Single-page application shell with inline theme detection
+- **CSS:** Design system with custom properties, no preprocessor (~450 lines)
+- **JS:** Vanilla ES module with zero dependencies (~550 lines)
+
+### CSS Design System
+
+```css
+:root {
+  /* Light theme (default) */
+  --bg-primary: #ffffff;
+  --bg-secondary: #f8f9fa;
+  --text-primary: #1a1a2e;
+  --text-secondary: #6c757d;
+  /* ... 40+ custom properties */
+}
+[data-theme="dark"] {
+  --bg-primary: #1a1a2e;
+  --bg-secondary: #16213e;
+  --text-primary: #e4e4e7;
+  --text-secondary: #a1a1aa;
+  /* ... same properties, dark values */
+}
+```
+
+- **Layout:** CSS Grid with fixed sidebar (260px) and scrollable main area
+- **Components:** cards, badges (level colors), tables, forms, buttons, progress bars, accordions, toast notifications, tabs
+- **Responsive:** collapses sidebar to top nav on screens < 768px
+- **Animations:** logo spin on hover, card entrance fade-up, accordion slide, toast slide-in
+- **Typography:** system font stack, monospace for logs
+
+### JS Architecture
+
+- **Module pattern:** IIFE returns `{init, state}` public API
+- **Routing:** hash-based (`/upload`, `/session/abc123`, `/` for dashboard)
+- **Event bus:** custom events on `document` for cross-component communication
+- **State:** `window.__state` object with sessions, current analysis, theme
+
+#### Pages
+
+| Route | Handler | Description |
+|---|---|---|
+| `#/` | `renderDashboard()` | Stats cards, session table, quick actions |
+| `#/upload` | `renderUpload()` | Drag-and-drop file area, command config, progress |
+| `#/session/:id` | `renderSession(id)` | 3-tab detail view (Overview, Events, Raw) |
+
+#### Dashboard (`renderDashboard`)
+
+- Fetches `GET /api/sessions` on mount
+- Stat cards (files analyzed today, total errors found, etc.)
+- Session table: filename, command, size, status, created, actions (view, delete)
+- Loading state with fallback text, error state with toast notification
+
+#### Upload (`renderUpload`)
+
+- Drag-and-drop file upload with visual feedback (highlight on dragover)
+- Command selector (scan, errors, top, grep) with conditional regex input
+- Flag toggles (JSON mode, color, level selector)
+- Progress bar during analysis (polls `GET /api/status/{id}` SSE)
+- On completion, redirects to session detail page
+
+#### Session Detail (`renderSession`)
+
+Three vertical tabs: Overview, Events, Raw
+
+**Overview tab:**
+- Stat cards: total lines, errors, warnings, info, time range
+- SVG bar chart: level breakdown with percentage labels and color-coded bars
+- Error groups: collapsible accordion, each showing count, time range, normalized signature, sample raw line
+
+**Events tab:**
+- Dropdown filter for event level
+- Text search within displayed results
+- Paginated table (100 events per page) with page number navigation
+- Expandable rows showing the full raw log line
+- Fetches from `GET /api/results/{id}/events?offset=N&limit=M`
+- Shows empty state for scan/top commands (no events available)
+
+**Raw tab:**
+- Fetches from `GET /api/uploaded/{id}`
+- Line-numbered display in monospace font
+- Useful for seeing the original file context
+
+### Theme
+
+- Detected on first visit via `prefers-color-scheme`
+- Toggled via button click (delegated event on `#theme-btn`)
+- Persisted to `localStorage` key `theme`
+- If no stored preference, follows system preference
+- Updates all CSS custom properties via `[data-theme]` attribute on `<html>`
+
+### Keyboard shortcuts
+
+| Shortcut | Handler |
+|---|---|
+| `⌘1` / `Ctrl+1` | Navigate to dashboard (`#/`) |
+| `⌘U` / `Ctrl+U` | Navigate to upload (`#/upload`) |
+
+### Toast notification system
+
+- Queue-based: `showToast(message, type)` creates a `<div class="toast">` with auto-dismiss
+- Types: `info`, `error`, `success`
+- Stacked: multiple toasts can be visible (each auto-dismisses after 4s)
+- Top-right positioning with slide-in animation
 
 ---
 
-## Project Structure
+## 9. Docker Deployment
 
+### `Dockerfile`
+
+```dockerfile
+# Builder
+FROM golang:1.22-alpine AS builder
+WORKDIR /app
+COPY go.mod go.sum ./
+RUN go mod download
+COPY . .
+RUN CGO_ENABLED=0 go build -ldflags="-s -w" -o /app/loganalyze ./main.go
+
+# Runtime
+FROM alpine:3.20
+RUN apk add --no-cache ca-certificates tzdata
+COPY --from=builder /app/loganalyze /usr/local/bin/loganalyze
+EXPOSE 8080
+ENTRYPOINT ["loganalyze"]
+CMD ["serve", "--addr", ":8080", "--data", "/data"]
 ```
-loganalyzer/
-├── main.go                 # CLI entry, cobra setup
-├── go.mod
-├── cmd/
-│   ├── root.go             # Root command + persistent flags
-│   ├── scan.go             # scan subcommand
-│   ├── errors.go           # errors subcommand
-│   ├── top.go              # top subcommand
-│   └── grep.go             # grep subcommand
-├── internal/
-│   ├── model/
-│   │   └── event.go        # Event struct, Level type
-│   ├── reader/
-│   │   └── reader.go       # File / stdin / glob iteration
-│   ├── parser/
-│   │   ├── parser.go       # Level & timestamp detection
-│   │   └── patterns.go     # Compiled regexes
-│   ├── normalizer/
-│   │   └── normalizer.go   # Signature normalization
-│   ├── analyzer/
-│   │   └── analyzer.go     # Counts, grouping, summary
-│   ├── filter/
-│   │   └── filter.go       # Regex / level / time filtering
-│   └── renderer/
-│       ├── console.go      # Colorized terminal output
-│       ├── json.go         # JSON export
-│       └── csv.go          # CSV export
-└── testdata/
-    └── samples/            # Sample log files for testing
+
+Key decisions:
+- Multi-stage to minimize image size (~7.6 MB)
+- `CGO_ENABLED=0` for static binary
+- `-ldflags="-s -w"` strips debug symbols
+- Alpine runtime with `ca-certificates` and `tzdata` for HTTPS and timezone support
+- Exposes port 8080 by default
+
+### `docker-compose.yml`
+
+```yaml
+services:
+  loganalyze:
+    build: .
+    ports:
+      - "8080:8080"
+    volumes:
+      - logdata:/data
+    environment:
+      - TZ=UTC
+    restart: unless-stopped
+volumes:
+  logdata:
 ```
+
+- Named volume for uploaded file persistence
+- UTC timezone for consistent timestamp handling
+- Auto-restart unless explicitly stopped
+
+---
+
+## 10. Testing Strategy
+
+### Unit tests
+
+Each `internal/` package has a `*_test.go` file:
+
+| Package | What's tested |
+|---|---|
+| `model` | Level parsing, JSON roundtrip, time comparison |
+| `reader` | Line reading, binary detection, stdin handling |
+| `parser` | Each format/timestamp/level pattern, edge cases |
+| `normalizer` | Each replacement rule, ordering, boundary cases |
+| `filter` | Level, regex, time-range filtering |
+| `analyzer` | Counting, grouping, min-heap behavior, limit |
+| `renderer` | Console/JSON/CSV format output |
+| `session` | CRUD, TTL expiry, concurrent access |
+| `server` | HTTP handler integration (if present) |
+
+### Test data
+
+`testdata/samples/` contains three sample log files:
+
+| File | Format | Lines | Description |
+|---|---|---|---|
+| `errors.log` | Mixed timestamps | ~50 | Hand-crafted error lines with UUIDs, IPs, paths |
+| `syslog.log` | BSD syslog | ~30 | Kernel messages with various levels |
+| `apache.log` | Apache CLF | ~20 | Web access logs with mixed status codes |
+
+### Running tests
+
+```bash
+go test ./...
+```
+
+### Test conventions
+
+- All test helpers use `t.Helper()`
+- Table-driven tests where appropriate (`tests []struct{name, input, expected}`)
+- No external test dependencies (no test frameworks, no fixtures server)
+- Sample files are committed alongside source code
+- Golden files are used for renderer output comparison
+
+---
+
+## Appendix A: Glossary
+
+| Term | Definition |
+|---|---|
+| **CLI** | Command-line interface (terminal application) |
+| **Event** | A single parsed log line with timestamp, level, message |
+| **Group** | A collection of error events with the same normalized signature |
+| **Message** | The extracted textual content of a log line (excluding timestamp and level) |
+| **Normalizer** | Component that replaces variable data (IDs, IPs, numbers) with tokens |
+| **Report** | The complete analysis output (counts, groups, events, time range) |
+| **Session** | Server-side state for an uploaded file + its analysis results |
+| **Signature** | A normalized message string used for grouping identical errors |
+| **SSE** | Server-Sent Events — unidirectional event stream for progress updates |
+| **SPA** | Single-Page Application — client-side routing and rendering |
+
+## Appendix B: Edge Cases
+
+| Scenario | Behavior |
+|---|---|
+| Empty file | Returns report with zero counts, no errors |
+| Binary file | Logs warning to stderr, skips content, reports total_lines as 0 |
+| No timestamps found | All events get zero-value time.Time (0001-01-01) |
+| No level keyword | Defaults to INFO |
+| Duplicate uploads | Each upload creates a new session with a new UUID |
+| Concurrent analysis | Each session runs analysis in its own goroutine |
+| Session expiry | Cleanup runs every 60s, removes sessions older than 1h |
+| Server restart | All sessions are lost (in-memory store, no persistence) |
+| Large files (>100MB) | Rejected at upload with 413 Payload Too Large |
+| No events for command | scan/top return empty events array; /events endpoint returns 400 |
+| Missing file in DELETE | No error — idempotent (file may already be cleaned up) |
+| Partial analysis on shutdown | Results are discarded; client gets 404 on next fetch |
+
+## Appendix C: HTTP Status Codes
+
+| Code | Usage |
+|---|---|
+| 200 | Successful GET/POST response with body |
+| 202 | Analysis started (async) |
+| 204 | Successful DELETE (no body) |
+| 400 | Bad request (invalid command, missing file, no events for command type) |
+| 404 | Session not found, analysis not yet complete |
+| 409 | Session was deleted |
+| 413 | Upload too large (>100 MB) |
+| 500 | Internal server error |
