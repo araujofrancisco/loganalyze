@@ -617,8 +617,6 @@ async function renderUploadResults(sessionId, cmd, resultEl) {
 }
 
 /* --- Session Detail ------------------------------------------ */
-let _sessionInsightsLoaded = {};
-
 function renderSession(id) {
   const html = `
     <div class="breadcrumb">
@@ -657,9 +655,7 @@ function setupSessionTabs() {
 
       if (tabName === 'insights') {
         const id = location.pathname.split('/')[2];
-        if (id && !_sessionInsightsLoaded[id]) {
-          loadInsightsTab(id);
-        }
+        if (id) loadInsightsTab(id);
       }
     });
   });
@@ -945,7 +941,6 @@ function loadInsightsTab(id) {
   const el = $('#tab-insights');
   if (!el) return;
 
-  _sessionInsightsLoaded[id] = true;
   el.innerHTML = '<div class="card"><div class="empty-state"><div class="spinner" style="width:16px;height:16px;border:2px solid var(--border);border-top-color:var(--accent);border-radius:50%;animation:spin 0.8s linear infinite;margin:0 auto 12px"></div><h3>Analyzing with AI...</h3></div></div>';
 
   const evtSource = new EventSource(`${API}/api/insights/${id}/stream`);
@@ -972,13 +967,31 @@ function loadInsightsTab(id) {
     </div>`;
   });
 
-  evtSource.addEventListener('error', function() {
+  evtSource.addEventListener('error', async function(e) {
     evtSource.close();
     if (!fullText) {
+      // Check REST endpoint in case background auto-generation cached it
+      try {
+        const data = await fetchJSON(`${API}/api/insights/${id}`);
+        if (data.summary) {
+          el.innerHTML = `<div class="card">
+            <div class="card-header"><h3>AI Insights</h3></div>
+            <div class="insights-text">${renderMarkdown(data.summary)}</div>
+          </div>`;
+          return;
+        }
+      } catch (_) {}
+
+      // Use the actual SSE error message when available
+      let msg = 'AI summarizer may not be configured. Ensure --ai-endpoint is set. Try again or contact admin.';
+      try {
+        const d = JSON.parse(e.data);
+        if (d.content) msg = d.content;
+      } catch (_) {}
       el.innerHTML = `<div class="card">
         <div class="card-header"><h3>AI Insights</h3></div>
         <div class="empty-state"><h3>Not available</h3>
-        <p>AI summarizer may not be configured. Ensure --ai-endpoint is set.</p></div>
+        <p>${escapeHtml(msg)}</p></div>
       </div>`;
     }
   });

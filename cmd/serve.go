@@ -39,6 +39,9 @@ var serveCmd = &cobra.Command{
 		}
 
 		srv := server.New(flagAddr, flagData, opts...)
+		if endpoint != "" {
+			cmd.Println("AI summarizer configured (model:", aiModel, ")")
+		}
 		if err := srv.Start(); err != nil {
 			cmd.PrintErrln("server error:", err)
 			os.Exit(1)

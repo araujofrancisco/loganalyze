@@ -221,7 +221,7 @@ func (s *Server) handleInsightsStream(w http.ResponseWriter, r *http.Request) {
 	}
 
 	req := summarizer.NewSummaryRequestFromReport(*ses.Report)
-	ctx, cancel := context.WithTimeout(r.Context(), 120*time.Second)
+	ctx, cancel := context.WithTimeout(context.Background(), 120*time.Second)
 	defer cancel()
 
 	ch, err := s.summarizer.SummarizeStream(ctx, req)
@@ -243,13 +243,20 @@ func (s *Server) handleInsightsStream(w http.ResponseWriter, r *http.Request) {
 		flusher.Flush()
 	}
 
-	fmt.Fprintf(w, "event: complete\ndata: {\"type\":\"done\"}\n\n")
-	flusher.Flush()
-
+	// Cache summary even if client disconnected
 	ses.SetSummary(&summarizer.Summary{
 		Text:      fullText.String(),
 		ModelUsed: s.aiModel,
 	})
+
+	select {
+	case <-r.Context().Done():
+		return
+	default:
+	}
+
+	fmt.Fprintf(w, "event: complete\ndata: {\"type\":\"done\"}\n\n")
+	flusher.Flush()
 }
 
 func (s *Server) handleStatus(w http.ResponseWriter, r *http.Request) {
@@ -490,6 +497,10 @@ func (s *Server) runAnalysis(ses *session.Session) {
 		}
 		ses.SetProgress(fmt.Sprintf("matched %d events", len(events)))
 		ses.SetComplete(nil, events)
+	}
+
+	if s.summarizer != nil && ses.Report != nil {
+		go s.generateSummary(ses)
 	}
 }
 

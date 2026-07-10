@@ -1,6 +1,7 @@
 package server
 
 import (
+	"context"
 	"log"
 	"net/http"
 	"time"
@@ -77,6 +78,25 @@ func (s *Server) Start() error {
 		}
 	}()
 
+	if s.summarizer != nil {
+		log.Printf("AI summarizer configured (model: %s, endpoint configured)", s.aiModel)
+	}
 	log.Printf("server listening on %s (data: %s)", s.addr, s.dataDir)
 	return http.ListenAndServe(s.addr, mux)
+}
+
+func (s *Server) generateSummary(ses *session.Session) {
+	if ses.Report == nil {
+		return
+	}
+	req := summarizer.NewSummaryRequestFromReport(*ses.Report)
+	ctx, cancel := context.WithTimeout(context.Background(), 120*time.Second)
+	defer cancel()
+	summary, err := s.summarizer.Summarize(ctx, req)
+	if err != nil {
+		log.Printf("background AI summary error for session %s: %v", ses.ID, err)
+		return
+	}
+	ses.SetSummary(summary)
+	log.Printf("background AI summary complete for session %s (model: %s)", ses.ID, summary.ModelUsed)
 }
