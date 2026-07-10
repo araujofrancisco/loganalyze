@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"regexp"
 	"strings"
 	"text/tabwriter"
 	"time"
@@ -146,6 +147,17 @@ func PrintAISummary(s *summarizer.Summary, w io.Writer) {
 	fmt.Fprintln(w)
 	fmt.Fprintln(w, styleInfo.Sprint("AI Analysis")+styleDim.Sprint(" ("+s.ModelUsed+"):"))
 	fmt.Fprintln(w, strings.Repeat("─", 50))
-	fmt.Fprintln(w, s.Text)
+	fmt.Fprintln(w, stripMarkdown(s.Text))
 	fmt.Fprintln(w)
+}
+
+func stripMarkdown(s string) string {
+	s = regexp.MustCompile(`\*\*(.+?)\*\*`).ReplaceAllString(s, "$1")
+	s = regexp.MustCompile(`__(.+?)__`).ReplaceAllString(s, "$1")
+	s = regexp.MustCompile(`\*(.+?)\*`).ReplaceAllString(s, "$1")
+	s = regexp.MustCompile(`_(.+?)_`).ReplaceAllString(s, "$1")
+	s = regexp.MustCompile("`(.+?)`").ReplaceAllString(s, "$1")
+	s = regexp.MustCompile(`(?m)^#{1,6}\s+`).ReplaceAllString(s, "")
+	s = regexp.MustCompile(`(?m)^-{3,}$`).ReplaceAllString(s, "")
+	return s
 }

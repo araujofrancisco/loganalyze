@@ -1147,8 +1147,57 @@ table tr.clickable {
   font-size: var(--fs-base);
   line-height: 1.8;
   color: var(--text-primary);
-  white-space: pre-wrap;
   word-break: break-word;
+}
+
+.insights-text h1,
+.insights-text h2,
+.insights-text h3 {
+  margin: 1.2em 0 0.4em;
+  font-weight: 700;
+  color: var(--text-primary);
+}
+.insights-text h1 { font-size: 1.3em; }
+.insights-text h2 { font-size: 1.15em; }
+.insights-text h3 { font-size: 1.05em; }
+
+.insights-text p {
+  margin: 0.5em 0;
+}
+.insights-text p:first-child {
+  margin-top: 0;
+}
+
+.insights-text ul,
+.insights-text ol {
+  margin: 0.5em 0;
+  padding-left: 1.5em;
+}
+.insights-text li {
+  margin: 0.25em 0;
+}
+
+.insights-text code {
+  font-family: "SFMono-Regular", Consolas, "Liberation Mono", Menlo, monospace;
+  font-size: 0.9em;
+  padding: 1px 5px;
+  border-radius: var(--radius-sm);
+  background: var(--bg-hover);
+  color: var(--accent);
+}
+
+.insights-text strong {
+  font-weight: 700;
+}
+
+.insights-text em {
+  font-style: italic;
+}
+
+.insights-text hr {
+  border: none;
+  border-top: 1px solid var(--border);
+  margin: 1em 0;
 }
 
 .cursor-blink {

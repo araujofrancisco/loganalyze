@@ -19,6 +19,62 @@ function escapeHtml(s) {
   return d.innerHTML;
 }
 
+function inlineMarkdown(s) {
+  return s
+    .replace(/\*\*(.+?)\*\*/g, '<strong>$1</strong>')
+    .replace(/\*(.+?)\*/g, '<em>$1</em>')
+    .replace(/`(.+?)`/g, '<code>$1</code>')
+    .replace(/__(.+?)__/g, '<strong>$1</strong>')
+    .replace(/_(.+?)_/g, '<em>$1</em>');
+}
+
+function renderMarkdown(text) {
+  if (!text) return '';
+  const e = escapeHtml(text);
+  const lines = e.split('\n');
+  let html = '';
+  let inList = false;
+
+  function closeList() {
+    if (inList === 'ul') { html += '</ul>'; inList = false; }
+    else if (inList === 'ol') { html += '</ol>'; inList = false; }
+  }
+
+  for (let i = 0; i < lines.length; i++) {
+    const line = lines[i];
+
+    const h3 = line.match(/^### (.+)/);
+    const h2 = line.match(/^## (.+)/);
+    const h1 = line.match(/^# (.+)/);
+    if (h3) { closeList(); html += '<h3>' + inlineMarkdown(h3[1]) + '</h3>'; continue; }
+    if (h2) { closeList(); html += '<h2>' + inlineMarkdown(h2[1]) + '</h2>'; continue; }
+    if (h1) { closeList(); html += '<h1>' + inlineMarkdown(h1[1]) + '</h1>'; continue; }
+
+    if (/^-{3,}$/.test(line.trim())) { closeList(); html += '<hr>'; continue; }
+
+    const ulMatch = line.match(/^- (.+)/);
+    if (ulMatch) {
+      if (!inList) { html += '<ul>'; inList = 'ul'; }
+      html += '<li>' + inlineMarkdown(ulMatch[1]) + '</li>';
+      continue;
+    }
+
+    const olMatch = line.match(/^\d+\.\s+(.+)/);
+    if (olMatch) {
+      if (!inList) { html += '<ol>'; inList = 'ol'; }
+      html += '<li>' + inlineMarkdown(olMatch[1]) + '</li>';
+      continue;
+    }
+
+    closeList();
+    if (line.trim() === '') continue;
+    html += '<p>' + inlineMarkdown(line) + '</p>';
+  }
+
+  closeList();
+  return html;
+}
+
 function formatBytes(b) {
   if (b < 1024) return b + ' B';
   if (b < 1048576) return (b / 1024).toFixed(1) + ' KB';
@@ -902,7 +958,7 @@ function loadInsightsTab(id) {
         fullText += data.content;
         el.innerHTML = `<div class="card">
           <div class="card-header"><h3>AI Insights</h3></div>
-          <div class="insights-text">${escapeHtml(fullText)}<span class="cursor-blink">▌</span></div>
+          <div class="insights-text">${renderMarkdown(fullText)}<span class="cursor-blink">▌</span></div>
         </div>`;
       }
     } catch (_) {}
@@ -912,7 +968,7 @@ function loadInsightsTab(id) {
     evtSource.close();
     el.innerHTML = `<div class="card">
       <div class="card-header"><h3>AI Insights</h3></div>
-      <div class="insights-text">${escapeHtml(fullText)}</div>
+      <div class="insights-text">${renderMarkdown(fullText)}</div>
     </div>`;
   });
 
