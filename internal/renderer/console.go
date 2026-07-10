@@ -9,9 +9,9 @@ import (
 	"text/tabwriter"
 	"time"
 
+	"github.com/araujofrancisco/loganalyze/internal/model"
+	"github.com/araujofrancisco/loganalyze/internal/summarizer"
 	"github.com/fatih/color"
-	"github.com/username/loganalyze/internal/model"
-	"github.com/username/loganalyze/internal/summarizer"
 )
 
 var (
@@ -22,13 +22,13 @@ var (
 	styleDebug = color.New(color.Faint)
 	styleDim   = color.New(color.Faint)
 
-	reBold       = regexp.MustCompile(`\*\*(.+?)\*\*`)
-	reBoldUnder  = regexp.MustCompile(`__(.+?)__`)
-	reItalic     = regexp.MustCompile(`\*(.+?)\*`)
+	reBold        = regexp.MustCompile(`\*\*(.+?)\*\*`)
+	reBoldUnder   = regexp.MustCompile(`__(.+?)__`)
+	reItalic      = regexp.MustCompile(`\*(.+?)\*`)
 	reItalicUnder = regexp.MustCompile(`_(.+?)_`)
-	reCode       = regexp.MustCompile("`(.+?)`")
-	reHeading    = regexp.MustCompile(`(?m)^#{1,6}\s+`)
-	reHR         = regexp.MustCompile(`(?m)^-{3,}$`)
+	reCode        = regexp.MustCompile("`(.+?)`")
+	reHeading     = regexp.MustCompile(`(?m)^#{1,6}\s+`)
+	reHR          = regexp.MustCompile(`(?m)^-{3,}$`)
 )
 
 func PrintReport(r model.Report, w io.Writer) {

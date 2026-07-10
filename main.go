@@ -1,7 +1,7 @@
 package main
 
 import (
-	"github.com/username/loganalyze/cmd"
+	"github.com/araujofrancisco/loganalyze/cmd"
 )
 
 func main() {

@@ -5,8 +5,8 @@ import (
 	"regexp"
 	"time"
 
-	"github.com/username/loganalyze/internal/filter"
-	"github.com/username/loganalyze/internal/model"
+	"github.com/araujofrancisco/loganalyze/internal/filter"
+	"github.com/araujofrancisco/loganalyze/internal/model"
 )
 
 func buildFilterConfig() filter.Config {

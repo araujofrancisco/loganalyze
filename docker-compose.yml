@@ -6,7 +6,7 @@ services:
     env_file:
       - .env
     environment:
-      - TZ=UTC
+      - TZ=America/Caracas
     volumes:
       - logdata:/data
     restart: unless-stopped

@@ -14,13 +14,13 @@ import (
 	"strings"
 	"time"
 
-	"github.com/username/loganalyze/internal/analyzer"
-	"github.com/username/loganalyze/internal/filter"
-	"github.com/username/loganalyze/internal/model"
-	"github.com/username/loganalyze/internal/parser"
-	"github.com/username/loganalyze/internal/reader"
-	"github.com/username/loganalyze/internal/session"
-	"github.com/username/loganalyze/internal/summarizer"
+	"github.com/araujofrancisco/loganalyze/internal/analyzer"
+	"github.com/araujofrancisco/loganalyze/internal/filter"
+	"github.com/araujofrancisco/loganalyze/internal/model"
+	"github.com/araujofrancisco/loganalyze/internal/parser"
+	"github.com/araujofrancisco/loganalyze/internal/reader"
+	"github.com/araujofrancisco/loganalyze/internal/session"
+	"github.com/araujofrancisco/loganalyze/internal/summarizer"
 )
 
 func (s *Server) handleUpload(w http.ResponseWriter, r *http.Request) {
@@ -139,9 +139,9 @@ func (s *Server) handleInsights(w http.ResponseWriter, r *http.Request) {
 
 	if ses.Summary != nil {
 		writeJSON(w, http.StatusOK, map[string]interface{}{
-			"summary":  ses.Summary.Text,
-			"model":    ses.Summary.ModelUsed,
-			"cached":   true,
+			"summary": ses.Summary.Text,
+			"model":   ses.Summary.ModelUsed,
+			"cached":  true,
 		})
 		return
 	}

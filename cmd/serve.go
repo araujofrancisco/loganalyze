@@ -3,9 +3,9 @@ package cmd
 import (
 	"os"
 
+	"github.com/araujofrancisco/loganalyze/internal/server"
+	"github.com/araujofrancisco/loganalyze/internal/summarizer"
 	"github.com/spf13/cobra"
-	"github.com/username/loganalyze/internal/server"
-	"github.com/username/loganalyze/internal/summarizer"
 )
 
 var (

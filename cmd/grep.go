@@ -4,8 +4,8 @@ import (
 	"os"
 	"regexp"
 
+	"github.com/araujofrancisco/loganalyze/internal/renderer"
 	"github.com/spf13/cobra"
-	"github.com/username/loganalyze/internal/renderer"
 )
 
 var grepCmd = &cobra.Command{

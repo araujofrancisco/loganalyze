@@ -1,4 +1,4 @@
-module github.com/username/loganalyze
+module github.com/araujofrancisco/loganalyze
 
 go 1.22
 

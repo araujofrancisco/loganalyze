@@ -5,8 +5,8 @@ import (
 	"sort"
 	"time"
 
-	"github.com/username/loganalyze/internal/model"
-	"github.com/username/loganalyze/internal/normalizer"
+	"github.com/araujofrancisco/loganalyze/internal/model"
+	"github.com/araujofrancisco/loganalyze/internal/normalizer"
 )
 
 type Report = model.Report

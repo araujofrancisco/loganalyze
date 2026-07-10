@@ -6,10 +6,10 @@ import (
 	"os"
 	"time"
 
+	"github.com/araujofrancisco/loganalyze/internal/analyzer"
+	"github.com/araujofrancisco/loganalyze/internal/renderer"
+	"github.com/araujofrancisco/loganalyze/internal/summarizer"
 	"github.com/spf13/cobra"
-	"github.com/username/loganalyze/internal/analyzer"
-	"github.com/username/loganalyze/internal/renderer"
-	"github.com/username/loganalyze/internal/summarizer"
 )
 
 var scanCmd = &cobra.Command{

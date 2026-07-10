@@ -6,8 +6,8 @@ import (
 	"sync"
 	"time"
 
-	"github.com/username/loganalyze/internal/model"
-	"github.com/username/loganalyze/internal/summarizer"
+	"github.com/araujofrancisco/loganalyze/internal/model"
+	"github.com/araujofrancisco/loganalyze/internal/summarizer"
 )
 
 type AnalyzeConfig struct {

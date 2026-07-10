@@ -4,7 +4,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/username/loganalyze/internal/model"
+	"github.com/araujofrancisco/loganalyze/internal/model"
 )
 
 func TestParseISOTimestamp(t *testing.T) {

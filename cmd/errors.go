@@ -3,9 +3,9 @@ package cmd
 import (
 	"os"
 
+	"github.com/araujofrancisco/loganalyze/internal/model"
+	"github.com/araujofrancisco/loganalyze/internal/renderer"
 	"github.com/spf13/cobra"
-	"github.com/username/loganalyze/internal/model"
-	"github.com/username/loganalyze/internal/renderer"
 )
 
 var errorsCmd = &cobra.Command{

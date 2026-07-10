@@ -6,9 +6,9 @@ import (
 	"net/http"
 	"time"
 
-	"github.com/username/loganalyze/internal/session"
-	"github.com/username/loganalyze/internal/summarizer"
-	"github.com/username/loganalyze/internal/web"
+	"github.com/araujofrancisco/loganalyze/internal/session"
+	"github.com/araujofrancisco/loganalyze/internal/summarizer"
+	"github.com/araujofrancisco/loganalyze/internal/web"
 )
 
 type Server struct {

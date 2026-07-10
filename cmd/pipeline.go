@@ -1,10 +1,10 @@
 package cmd
 
 import (
-	"github.com/username/loganalyze/internal/filter"
-	"github.com/username/loganalyze/internal/model"
-	"github.com/username/loganalyze/internal/parser"
-	"github.com/username/loganalyze/internal/reader"
+	"github.com/araujofrancisco/loganalyze/internal/filter"
+	"github.com/araujofrancisco/loganalyze/internal/model"
+	"github.com/araujofrancisco/loganalyze/internal/parser"
+	"github.com/araujofrancisco/loganalyze/internal/reader"
 )
 
 func startPipeline(args []string, cfg filter.Config, limit int) chan model.Event {

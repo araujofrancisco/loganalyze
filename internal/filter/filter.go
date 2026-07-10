@@ -4,7 +4,7 @@ import (
 	"regexp"
 	"time"
 
-	"github.com/username/loganalyze/internal/model"
+	"github.com/araujofrancisco/loganalyze/internal/model"
 )
 
 type Config struct {

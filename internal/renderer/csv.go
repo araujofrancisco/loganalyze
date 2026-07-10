@@ -7,7 +7,7 @@ import (
 	"os"
 	"time"
 
-	"github.com/username/loganalyze/internal/model"
+	"github.com/araujofrancisco/loganalyze/internal/model"
 )
 
 func PrintScanCSV(r model.Report, w io.Writer) {
