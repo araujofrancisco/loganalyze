@@ -21,6 +21,14 @@ var (
 	styleInfo  = color.New(color.FgCyan)
 	styleDebug = color.New(color.Faint)
 	styleDim   = color.New(color.Faint)
+
+	reBold       = regexp.MustCompile(`\*\*(.+?)\*\*`)
+	reBoldUnder  = regexp.MustCompile(`__(.+?)__`)
+	reItalic     = regexp.MustCompile(`\*(.+?)\*`)
+	reItalicUnder = regexp.MustCompile(`_(.+?)_`)
+	reCode       = regexp.MustCompile("`(.+?)`")
+	reHeading    = regexp.MustCompile(`(?m)^#{1,6}\s+`)
+	reHR         = regexp.MustCompile(`(?m)^-{3,}$`)
 )
 
 func PrintReport(r model.Report, w io.Writer) {
@@ -152,12 +160,12 @@ func PrintAISummary(s *summarizer.Summary, w io.Writer) {
 }
 
 func stripMarkdown(s string) string {
-	s = regexp.MustCompile(`\*\*(.+?)\*\*`).ReplaceAllString(s, "$1")
-	s = regexp.MustCompile(`__(.+?)__`).ReplaceAllString(s, "$1")
-	s = regexp.MustCompile(`\*(.+?)\*`).ReplaceAllString(s, "$1")
-	s = regexp.MustCompile(`_(.+?)_`).ReplaceAllString(s, "$1")
-	s = regexp.MustCompile("`(.+?)`").ReplaceAllString(s, "$1")
-	s = regexp.MustCompile(`(?m)^#{1,6}\s+`).ReplaceAllString(s, "")
-	s = regexp.MustCompile(`(?m)^-{3,}$`).ReplaceAllString(s, "")
+	s = reBold.ReplaceAllString(s, "$1")
+	s = reBoldUnder.ReplaceAllString(s, "$1")
+	s = reItalic.ReplaceAllString(s, "$1")
+	s = reItalicUnder.ReplaceAllString(s, "$1")
+	s = reCode.ReplaceAllString(s, "$1")
+	s = reHeading.ReplaceAllString(s, "")
+	s = reHR.ReplaceAllString(s, "")
 	return s
 }

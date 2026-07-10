@@ -8,10 +8,6 @@ import (
 
 	"github.com/spf13/cobra"
 	"github.com/username/loganalyze/internal/analyzer"
-	"github.com/username/loganalyze/internal/filter"
-	"github.com/username/loganalyze/internal/model"
-	"github.com/username/loganalyze/internal/parser"
-	"github.com/username/loganalyze/internal/reader"
 	"github.com/username/loganalyze/internal/renderer"
 	"github.com/username/loganalyze/internal/summarizer"
 )
@@ -21,18 +17,7 @@ var scanCmd = &cobra.Command{
 	Short: "Full analysis report of log files",
 	Run: func(cmd *cobra.Command, args []string) {
 		cfg := buildFilterConfig()
-		lines := reader.ReadLines(args, len(args) == 0)
-
-		eventCh := make(chan model.Event, 1000)
-		go func() {
-			defer close(eventCh)
-			for line := range lines {
-				evt := parser.ParseLine(line.Text, line.Line, line.Source)
-				if filter.Matches(evt, cfg) {
-					eventCh <- evt
-				}
-			}
-		}()
+		eventCh := startPipeline(args, cfg, 0)
 
 		report := analyzer.Analyze(eventCh, flagLimit)
 		if len(args) > 0 {
@@ -50,21 +35,14 @@ var scanCmd = &cobra.Command{
 			renderer.PrintReport(report, os.Stdout)
 		}
 
-		endpoint := flagAIEndpoint
-		if endpoint == "" {
-			endpoint = os.Getenv("LOGANALYZE_AI_ENDPOINT")
-		}
-		model := flagAIModel
-		if envModel := os.Getenv("LOGANALYZE_AI_MODEL"); envModel != "" {
-			model = envModel
-		}
+		endpoint, aiModel := getAIConfig()
 		if endpoint != "" {
 			s := summarizer.NewLLM(summarizer.Config{
 				Endpoint: endpoint,
-				Model:    model,
+				Model:    aiModel,
 				APIKey:   os.Getenv("LOGANALYZE_AI_KEY"),
 			})
-			req := buildSummaryRequest(report)
+			req := summarizer.NewSummaryRequestFromReport(report)
 			ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
 			defer cancel()
 			summary, err := s.Summarize(ctx, req)

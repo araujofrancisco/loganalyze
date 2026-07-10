@@ -4,10 +4,7 @@ import (
 	"os"
 
 	"github.com/spf13/cobra"
-	"github.com/username/loganalyze/internal/filter"
 	"github.com/username/loganalyze/internal/model"
-	"github.com/username/loganalyze/internal/parser"
-	"github.com/username/loganalyze/internal/reader"
 	"github.com/username/loganalyze/internal/renderer"
 )
 
@@ -19,18 +16,7 @@ var errorsCmd = &cobra.Command{
 		if cfg.MinLevel < model.LevelError {
 			cfg.MinLevel = model.LevelError
 		}
-		lines := reader.ReadLines(args, len(args) == 0)
-
-		eventCh := make(chan model.Event, 1000)
-		go func() {
-			defer close(eventCh)
-			for line := range lines {
-				evt := parser.ParseLine(line.Text, line.Line, line.Source)
-				if filter.Matches(evt, cfg) {
-					eventCh <- evt
-				}
-			}
-		}()
+		eventCh := startPipeline(args, cfg, flagLimit)
 
 		switch {
 		case flagJSON:

@@ -10,10 +10,11 @@
 4. [Streaming Pipeline](#4-streaming-pipeline)
 5. [Normalization Engine](#5-normalization-engine)
 6. [Analyzer Implementation](#6-analyzer-implementation)
-7. [Server API](#7-server-api)
-8. [Web UI Architecture](#8-web-ui-architecture)
-9. [Docker Deployment](#9-docker-deployment)
-10. [Testing Strategy](#10-testing-strategy)
+7. [AI Summarizer](#7-ai-summarizer)
+8. [Server API](#8-server-api)
+9. [Web UI Architecture](#9-web-ui-architecture)
+10. [Docker Deployment](#10-docker-deployment)
+11. [Testing Strategy](#11-testing-strategy)
 
 ---
 
@@ -30,12 +31,13 @@
      │             │                              │
      ▼             ▼                              ▼
 ┌──────────┐  ┌──────────┐                 ┌──────────┐
-│ CLI mode │  │ Serve    │                 │ Shared   │
-│          │  │ mode     │                 │ Flags    │
-│ scan,    │  │ HTTP     │                 │ --since  │
-│ errors,  │  │ server   │                 │ --until  │
-│ top,     │  │ with web │                 │ --level  │
-│ grep     │  │ UI       │                 │ --json   │
+│ CLI mode │  │ Serve    │                 │ Shared        │
+│          │  │ mode     │                 │ Flags         │
+│ scan,    │  │ HTTP     │                 │ --since       │
+│ errors,  │  │ server   │                 │ --until       │
+│ top,     │  │ with web │                 │ --level       │
+│ grep     │  │ UI       │                 │ --json        │
+│          │  │ + AI     │                 │ --ai-endpoint │
 └──────────┘  └──────────┘                 │ --csv    │
                                            │ --no-col │
                                            │ --limit  │
@@ -109,10 +111,7 @@ type Report struct {
     StartTime   string            `json:"start_time,omitempty"`  // min timestamp
     EndTime     string            `json:"end_time,omitempty"`    // max timestamp
     Duration    string            `json:"duration,omitempty"`    // human duration
-    Command     string            `json:"command,omitempty"`     // "scan", "errors", "top", "grep"
-
-    // Internal: not serialized
-    matchedEvents []Event         // populated for errors/grep commands; nil for scan/top
+	Command     string            `json:"command,omitempty"`     // "scan", "errors", "top", "grep"
 }
 ```
 
@@ -129,6 +128,7 @@ Every package defines a single exported function (not an interface):
 | `normalizer.Normalize` | `(string) → string` | Replace IDs/paths with tokens |
 | `filter.ShouldKeep` | `(*Event, *Config) → bool` | Level/time/regex filter |
 | `analyzer.Analyze` | `(chan *Event, *Config) → *Report` | Streaming analysis |
+| `summarizer.Summarize` | `(context, SummaryRequest) → *Summary` | AI-powered error analysis |
 | `renderer.Render*` | `(*Report, io.Writer)` | Console/JSON/CSV output |
 
 ---
@@ -263,7 +263,54 @@ if h.Len() > cfg.Limit {
 
 ---
 
-## 7. Server API
+## 7. AI Summarizer
+
+### Location: `internal/summarizer/`
+
+**Purpose:** Generate an AI-powered natural-language analysis of error patterns. Two implementations: noop (default, zero weight) and LLM (OpenAI-compatible HTTP).
+
+### Interface
+
+```go
+type Summarizer interface {
+    Summarize(ctx context.Context, req SummaryRequest) (*Summary, error)
+    SummarizeStream(ctx context.Context, req SummaryRequest) (<-chan string, error)
+}
+```
+
+### Request (`SummaryRequest`)
+
+| Field | Type | Description |
+|---|---|---|
+| `Source` | string | Filename or "stdin" |
+| `TotalLines` | int | Lines processed |
+| `Levels` | map[string]int | Level distribution (ERROR, WARN, etc.) |
+| `TimeRange` | string | Human-readable time range |
+| `TopErrors` | []ErrorGroupSummary | Up to `--limit` normalized error groups |
+
+### LLM implementation (`llm.go`)
+
+- Constructs a prompt with level distribution and top error groups (not raw lines)
+- POSTs to `{endpoint}/chat/completions` (OpenAI-compatible API)
+- Supports both sync and SSE streaming via `stream: true`
+- API key sent as `Authorization: Bearer` header
+- Defaults to noop when no endpoint is configured
+- 60s timeout on sync, 120s on stream
+
+### Integration
+
+- **CLI:** `scan` and `top` commands call `Summarize` after analysis if `--ai-endpoint` is set, render via `PrintAISummary` (strips markdown)
+- **Server:** `GET /api/insights/{id}` (sync) and `GET /api/insights/{id}/stream` (SSE) endpoints; results cached on session
+- **Web UI:** AI Insights tab streams markdown content via `EventSource` and renders it client-side
+
+### Security
+
+- API key read from `LOGANALYZE_AI_KEY` env var only (not from flags)
+- Shared `NewSummaryRequestFromReport` helper avoids duplication between CLI and server
+
+---
+
+## 8. Server API
 
 ### Location: `internal/server/handlers.go`, `internal/server/server.go`
 
@@ -334,6 +381,23 @@ if h.Len() > cfg.Limit {
 
 - Returns `{"status":"ok","timestamp":"..."}`
 
+#### `GET /api/insights/{id}`
+
+- Returns AI-generated summary as JSON: `{"summary":"...", "model":"...", "cached":true|false}`
+- Requires `--ai-endpoint` to be configured at server start
+- Returns 501 if summarizer not configured
+- Returns 409 if analysis is not yet complete
+- Results are cached on the session after first generation
+
+#### `GET /api/insights/{id}/stream`
+
+- Server-Sent Events stream of markdown content
+- Same preconditions as sync endpoint
+- Streams tokens as `data: {"type":"text","content":"..."}\n\n`
+- Sends `event: complete` with `{"type":"done"}` when finished
+- Sends `event: error` with `{"type":"error","content":"..."}` on failure
+- Caches the complete response on session after streaming finishes
+
 ### Router
 
 Uses `http.ServeMux` (Go 1.22+ method-based routing):
@@ -348,6 +412,8 @@ mux.HandleFunc("GET /api/status/{id}", ...)
 mux.HandleFunc("GET /api/sessions", ...)
 mux.HandleFunc("DELETE /api/sessions/{id}", ...)
 mux.HandleFunc("GET /api/uploaded/{id}", ...)
+mux.HandleFunc("GET /api/insights/{id}", ...)
+mux.HandleFunc("GET /api/insights/{id}/stream", ...)
 mux.HandleFunc("GET /health", ...)
 ```
 
@@ -365,7 +431,7 @@ Note: `http.StripPrefix` is NOT used — the embedded `static/` directory is str
 - **Content-Type:** enforces JSON content type for `POST` requests to `/api/analyze`
 - **Logging:** logs method, path, status, and duration to stderr
 - **Recovery:** catches panics, returns 500, logs stack trace
-- **Cleanup:** background goroutine removes expired sessions every 60s
+- **Cleanup:** background goroutine removes expired sessions every 10 minutes
 
 ### Signal handling
 
@@ -379,7 +445,7 @@ Graceful shutdown: stop HTTP server, cancel contexts, wait for active analyses t
 
 ---
 
-## 8. Web UI Architecture
+## 9. Web UI Architecture
 
 ### Location: `internal/web/static/`
 
@@ -428,7 +494,7 @@ Graceful shutdown: stop HTTP server, cancel contexts, wait for active analyses t
 |---|---|---|
 | `#/` | `renderDashboard()` | Stats cards, session table, quick actions |
 | `#/upload` | `renderUpload()` | Drag-and-drop file area, command config, progress |
-| `#/session/:id` | `renderSession(id)` | 3-tab detail view (Overview, Events, Raw) |
+| `#/session/:id` | `renderSession(id)` | 4-tab detail view (Overview, Events, AI Insights, Raw) |
 
 #### Dashboard (`renderDashboard`)
 
@@ -491,7 +557,7 @@ Three vertical tabs: Overview, Events, Raw
 
 ---
 
-## 9. Docker Deployment
+## 10. Docker Deployment
 
 ### `Dockerfile`
 
@@ -527,11 +593,13 @@ services:
   loganalyze:
     build: .
     ports:
-      - "8080:8080"
-    volumes:
-      - logdata:/data
+      - "8081:8080"
+    env_file:
+      - .env
     environment:
       - TZ=UTC
+    volumes:
+      - logdata:/data
     restart: unless-stopped
 volumes:
   logdata:
@@ -543,7 +611,7 @@ volumes:
 
 ---
 
-## 10. Testing Strategy
+## 11. Testing Strategy
 
 ### Unit tests
 
@@ -560,6 +628,7 @@ Each `internal/` package has a `*_test.go` file:
 | `renderer` | Console/JSON/CSV format output |
 | `session` | CRUD, TTL expiry, concurrent access |
 | `server` | HTTP handler integration (if present) |
+| `summarizer` | Prompt building, LLM sync/stream, HTTP error handling, auth, timeout, noop fallback |
 
 ### Test data
 
@@ -612,7 +681,7 @@ go test ./...
 | No level keyword | Defaults to INFO |
 | Duplicate uploads | Each upload creates a new session with a new UUID |
 | Concurrent analysis | Each session runs analysis in its own goroutine |
-| Session expiry | Cleanup runs every 60s, removes sessions older than 1h |
+| Session expiry | Cleanup runs every 10 minutes, removes sessions older than 1h |
 | Server restart | All sessions are lost (in-memory store, no persistence) |
 | Large files (>100MB) | Rejected at upload with 413 Payload Too Large |
 | No events for command | scan/top return empty events array; /events endpoint returns 400 |

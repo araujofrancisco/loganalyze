@@ -16,7 +16,7 @@ A CLI tool and web application that reads log files and answers: *what's failing
 
 ```bash
 docker compose up --build
-# Open http://localhost:8080
+# Open http://localhost:8081
 ```
 
 ### From source
@@ -36,9 +36,9 @@ go build -o loganalyze ./main.go
 |---|---|---|
 | `scan` | `loganalyze scan app.log` | Full report: totals, level breakdown, top errors |
 | `errors` | `loganalyze errors app.log --since 1h` | Error-level lines with context |
-| `top` | `loganalyze top app.log --limit 20` | Top N recurring error patterns |
+| `top` | `loganalyze top app.log --limit 20` | Top N recurring error patterns (supports `--ai-endpoint`) |
 | `grep` | `loganalyze grep app.log "timeout\|panic"` | Regex search with highlighting |
-| `serve` | `loganalyze serve --addr :8080` | HTTP server with web UI |
+| `serve` | `loganalyze serve --addr :8080` | HTTP server with web UI (supports `--ai-endpoint`) |
 
 ### Global flags
 
@@ -51,6 +51,8 @@ go build -o loganalyze ./main.go
 | `--csv` | false | CSV output |
 | `--no-color` | false | Disable ANSI colors |
 | `--limit` | 10 | Max results (top errors, grep matches) |
+| `--ai-endpoint` | `""` | OpenAI-compatible API endpoint for AI summary (also: `LOGANALYZE_AI_ENDPOINT`) |
+| `--ai-model` | `gpt-4o-mini` | AI model name (also: `LOGANALYZE_AI_MODEL`) |
 
 ### Examples
 
@@ -110,7 +112,7 @@ Top errors:
 
 ```bash
 docker compose up
-# → http://localhost:8080
+# → http://localhost:8081
 ```
 
 ### Pages
@@ -126,6 +128,13 @@ docker compose up
 - Stat cards: total lines, errors, warnings, info
 - SVG bar chart: visual level breakdown with percentage labels
 - Error groups: collapsible accordion with count, time range, and sample message
+
+### AI Insights tab
+
+- AI-powered analysis of error patterns using an OpenAI-compatible API
+- Streaming markdown output with real-time rendering
+- Requires `--ai-endpoint` / `LOGANALYZE_AI_ENDPOINT` to configure
+- Cached on session after first generation
 
 ### Events tab
 
@@ -197,6 +206,8 @@ Groups are tracked by a streaming top-K min-heap (bounded by `--limit`). Only ev
 | `GET` | `/api/sessions` | List active sessions |
 | `DELETE` | `/api/sessions/{id}` | Delete session and uploaded file |
 | `GET` | `/api/uploaded/{id}` | Download the original uploaded file |
+| `GET` | `/api/insights/{id}` | AI summary (sync, cached after first call) |
+| `GET` | `/api/insights/{id}/stream` | AI summary (SSE streaming) |
 | `GET` | `/health` | Health check |
 
 ### Upload + analyze via curl
@@ -248,7 +259,11 @@ services:
   loganalyze:
     build: .
     ports:
-      - "8080:8080"
+      - "8081:8080"
+    env_file:
+      - .env
+    environment:
+      - TZ=UTC
     volumes:
       - logdata:/data
     restart: unless-stopped

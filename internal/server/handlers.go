@@ -2,6 +2,7 @@ package server
 
 import (
 	"context"
+	"crypto/rand"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -41,7 +42,9 @@ func (s *Server) handleUpload(w http.ResponseWriter, r *http.Request) {
 		name = fmt.Sprintf("upload_%d.log", time.Now().UnixNano())
 	}
 
-	id := fmt.Sprintf("%x", time.Now().UnixNano())
+	b := make([]byte, 16)
+	rand.Read(b)
+	id := fmt.Sprintf("%x", b)
 	dst := filepath.Join(s.dataDir, id+".log")
 
 	f, err := os.Create(dst)
@@ -128,41 +131,6 @@ func (s *Server) handleResults(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, resp)
 }
 
-func (s *Server) buildInsightsRequest(ses *session.Session) (*summarizer.SummaryRequest, error) {
-	if ses.Report == nil {
-		return nil, fmt.Errorf("session has no report data")
-	}
-
-	levels := make(map[string]int)
-	for lvl, count := range ses.Report.Levels {
-		levels[lvl.String()] = count
-	}
-
-	timeRange := ""
-	if !ses.Report.FirstLine.IsZero() && !ses.Report.LastLine.IsZero() {
-		timeRange = fmt.Sprintf("%s — %s",
-			ses.Report.FirstLine.Format("2006-01-02 15:04:05"),
-			ses.Report.LastLine.Format("2006-01-02 15:04:05"))
-	}
-
-	top := make([]summarizer.ErrorGroupSummary, len(ses.Report.TopErrors))
-	for i, g := range ses.Report.TopErrors {
-		top[i] = summarizer.ErrorGroupSummary{
-			Signature:     g.Signature,
-			SampleMessage: g.SampleMessage,
-			Count:         g.Count,
-		}
-	}
-
-	return &summarizer.SummaryRequest{
-		Source:     ses.Report.Source,
-		TotalLines: ses.Report.TotalLines,
-		Levels:     levels,
-		TimeRange:  timeRange,
-		TopErrors:  top,
-	}, nil
-}
-
 func (s *Server) handleInsights(w http.ResponseWriter, r *http.Request) {
 	ses := s.getSession(w, r)
 	if ses == nil {
@@ -188,16 +156,16 @@ func (s *Server) handleInsights(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	req, err := s.buildInsightsRequest(ses)
-	if err != nil {
-		http.Error(w, err.Error(), http.StatusBadRequest)
+	if ses.Report == nil {
+		http.Error(w, "session has no report data", http.StatusBadRequest)
 		return
 	}
 
+	req := summarizer.NewSummaryRequestFromReport(*ses.Report)
 	ctx, cancel := context.WithTimeout(r.Context(), 60*time.Second)
 	defer cancel()
 
-	summary, err := s.summarizer.Summarize(ctx, *req)
+	summary, err := s.summarizer.Summarize(ctx, req)
 	if err != nil {
 		log.Printf("insights error for session %s: %v", ses.ID, err)
 		http.Error(w, "AI summarization failed: "+err.Error(), http.StatusInternalServerError)
@@ -246,17 +214,17 @@ func (s *Server) handleInsightsStream(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	req, err := s.buildInsightsRequest(ses)
-	if err != nil {
-		fmt.Fprintf(w, "event: error\ndata: {\"type\":\"error\",\"content\":%q}\n\n", err.Error())
+	if ses.Report == nil {
+		fmt.Fprintf(w, "event: error\ndata: {\"type\":\"error\",\"content\":\"session has no report data\"}\n\n")
 		flusher.Flush()
 		return
 	}
 
+	req := summarizer.NewSummaryRequestFromReport(*ses.Report)
 	ctx, cancel := context.WithTimeout(r.Context(), 120*time.Second)
 	defer cancel()
 
-	ch, err := s.summarizer.SummarizeStream(ctx, *req)
+	ch, err := s.summarizer.SummarizeStream(ctx, req)
 	if err != nil {
 		fmt.Fprintf(w, "event: error\ndata: {\"type\":\"error\",\"content\":%q}\n\n", err.Error())
 		flusher.Flush()
@@ -299,6 +267,24 @@ func (s *Server) handleStatus(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "text/event-stream")
 	w.Header().Set("Cache-Control", "no-cache")
 	w.Header().Set("Connection", "keep-alive")
+
+	status := ses.GetStatus()
+	progress := ses.GetProgress()
+	if status == "complete" {
+		fmt.Fprintf(w, "event: complete\ndata: {\"status\":\"complete\"}\n\n")
+		flusher.Flush()
+		return
+	}
+	if status == "error" {
+		fmt.Fprintf(w, "event: error\ndata: {\"status\":\"error\"}\n\n")
+		flusher.Flush()
+		return
+	}
+	if progress != "" {
+		data := fmt.Sprintf(`{"status":"running","progress":%q}`, progress)
+		fmt.Fprintf(w, "event: progress\ndata: %s\n\n", data)
+		flusher.Flush()
+	}
 
 	ticker := time.NewTicker(500 * time.Millisecond)
 	defer ticker.Stop()

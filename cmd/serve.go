@@ -26,22 +26,15 @@ var serveCmd = &cobra.Command{
 		}
 
 		var opts []server.Option
-		endpoint := flagAIEndpoint
-		if endpoint == "" {
-			endpoint = os.Getenv("LOGANALYZE_AI_ENDPOINT")
-		}
-		model := flagAIModel
-		if envModel := os.Getenv("LOGANALYZE_AI_MODEL"); envModel != "" {
-			model = envModel
-		}
+		endpoint, aiModel := getAIConfig()
 		if endpoint != "" {
 			opts = append(opts, server.WithSummarizer(
 				summarizer.NewLLM(summarizer.Config{
 					Endpoint: endpoint,
-					Model:    model,
+					Model:    aiModel,
 					APIKey:   os.Getenv("LOGANALYZE_AI_KEY"),
 				}),
-				model,
+				aiModel,
 			))
 		}
 
@@ -56,7 +49,5 @@ var serveCmd = &cobra.Command{
 func init() {
 	serveCmd.Flags().StringVarP(&flagAddr, "addr", "a", ":8080", "listen address")
 	serveCmd.Flags().StringVarP(&flagData, "data", "d", "/data", "data directory for uploads")
-	serveCmd.Flags().StringVar(&flagAIEndpoint, "ai-endpoint", "", "OpenAI-compatible API endpoint for AI insights")
-	serveCmd.Flags().StringVar(&flagAIModel, "ai-model", "gpt-4o-mini", "AI model name for insights")
 	rootCmd.AddCommand(serveCmd)
 }
