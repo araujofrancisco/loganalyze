@@ -4,11 +4,13 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"strings"
 	"text/tabwriter"
 	"time"
 
 	"github.com/fatih/color"
 	"github.com/username/loganalyze/internal/model"
+	"github.com/username/loganalyze/internal/summarizer"
 )
 
 var (
@@ -135,4 +137,15 @@ func formatEvent(evt model.Event) string {
 		evt.LineNum,
 		evt.Message,
 	)
+}
+
+func PrintAISummary(s *summarizer.Summary, w io.Writer) {
+	if w == nil {
+		w = os.Stdout
+	}
+	fmt.Fprintln(w)
+	fmt.Fprintln(w, styleInfo.Sprint("AI Analysis")+styleDim.Sprint(" ("+s.ModelUsed+"):"))
+	fmt.Fprintln(w, strings.Repeat("─", 50))
+	fmt.Fprintln(w, s.Text)
+	fmt.Fprintln(w)
 }

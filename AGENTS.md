@@ -42,6 +42,15 @@ Normalizer is only called during the Analyzer grouping step, not per-line.
 UUIDs → `<uuid>`, request IDs → `<req>`, IPv6/IPv4 → `<ip>`, hex → `<hex>`,
 file paths → `<path>`, hashes (40+ hex) → `<hash>`, standalone numbers → `<n>`
 
+## AI summarizer (`internal/summarizer/`)
+- Interface: `Summarizer` with `Summarize` (sync) and `SummarizeStream` (SSE)
+- Two impls: `noop` (default, zero weight) and `llm` (OpenAI-compatible HTTP, stdlib only)
+- Configured via `--ai-endpoint` / `LOGANALYZE_AI_ENDPOINT` env var and `LOGANALYZE_AI_KEY`
+- Prompt built from normalized error groups + level distribution, not raw lines
+- SSE streaming in web UI via `GET /api/insights/{id}/stream`
+- Summary cached on session after first generation
+- CLI flags available on `scan`, `top`, and `serve` commands
+
 ## Testing
 - `go test ./...` — unit tests per internal package
 - Test data in `testdata/samples/`; add new samples alongside new parsers

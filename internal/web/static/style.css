@@ -1141,3 +1141,20 @@ table tr.clickable {
   color: var(--text-secondary);
   margin-bottom: var(--space-3);
 }
+
+/* --- AI Insights text ------------------------------------- */
+.insights-text {
+  font-size: var(--fs-base);
+  line-height: 1.8;
+  color: var(--text-primary);
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+
+.cursor-blink {
+  animation: blink 1s step-end infinite;
+}
+
+@keyframes blink {
+  50% { opacity: 0; }
+}

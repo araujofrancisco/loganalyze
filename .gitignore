@@ -14,3 +14,6 @@ Thumbs.db
 
 # Temp
 /tmp/
+
+# Environment (sensitive credentials)
+.env

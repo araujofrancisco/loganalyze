@@ -1,7 +1,10 @@
 package cmd
 
 import (
+	"context"
+	"fmt"
 	"os"
+	"time"
 
 	"github.com/spf13/cobra"
 	"github.com/username/loganalyze/internal/analyzer"
@@ -10,6 +13,7 @@ import (
 	"github.com/username/loganalyze/internal/parser"
 	"github.com/username/loganalyze/internal/reader"
 	"github.com/username/loganalyze/internal/renderer"
+	"github.com/username/loganalyze/internal/summarizer"
 )
 
 var scanCmd = &cobra.Command{
@@ -44,6 +48,31 @@ var scanCmd = &cobra.Command{
 			renderer.PrintScanCSV(report, os.Stdout)
 		default:
 			renderer.PrintReport(report, os.Stdout)
+		}
+
+		endpoint := flagAIEndpoint
+		if endpoint == "" {
+			endpoint = os.Getenv("LOGANALYZE_AI_ENDPOINT")
+		}
+		model := flagAIModel
+		if envModel := os.Getenv("LOGANALYZE_AI_MODEL"); envModel != "" {
+			model = envModel
+		}
+		if endpoint != "" {
+			s := summarizer.NewLLM(summarizer.Config{
+				Endpoint: endpoint,
+				Model:    model,
+				APIKey:   os.Getenv("LOGANALYZE_AI_KEY"),
+			})
+			req := buildSummaryRequest(report)
+			ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
+			defer cancel()
+			summary, err := s.Summarize(ctx, req)
+			if err != nil {
+				fmt.Fprintln(os.Stderr, "AI summary error:", err)
+			} else {
+				renderer.PrintAISummary(summary, os.Stdout)
+			}
 		}
 	},
 }
