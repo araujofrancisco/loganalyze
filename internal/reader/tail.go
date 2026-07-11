@@ -16,14 +16,13 @@ func TailFile(ctx context.Context, path string, fromEnd bool) (<-chan Line, erro
 		return nil, err
 	}
 
-	var r io.Reader = f
+	var r io.ReadCloser = f
 	if isGzip(f) {
 		gr, err := gzip.NewReader(f)
 		if err != nil {
 			f.Close()
 			return nil, err
 		}
-		defer gr.Close()
 		r = gr
 		// gzip is static — ignore fromEnd, seek doesn't apply
 	} else if fromEnd {
@@ -34,13 +33,13 @@ func TailFile(ctx context.Context, path string, fromEnd bool) (<-chan Line, erro
 	}
 
 	ch := make(chan Line, 1000)
-	go tailReader(ctx, r, f, path, ch)
+	go tailReader(ctx, r, path, ch)
 	return ch, nil
 }
 
-func tailReader(ctx context.Context, r io.Reader, closer io.Closer, source string, ch chan<- Line) {
+func tailReader(ctx context.Context, r io.ReadCloser, source string, ch chan<- Line) {
 	defer close(ch)
-	defer closer.Close()
+	defer r.Close()
 
 	lineNum := 0
 	var buf []byte

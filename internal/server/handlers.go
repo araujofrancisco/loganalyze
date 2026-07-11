@@ -1,6 +1,7 @@
 package server
 
 import (
+	"bufio"
 	"bytes"
 	"compress/gzip"
 	"context"
@@ -460,11 +461,32 @@ func (s *Server) handleWatch(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Cache-Control", "no-cache")
 	w.Header().Set("Connection", "keep-alive")
 
+	if rc := http.NewResponseController(w); rc != nil {
+		rc.SetWriteDeadline(time.Time{})
+	}
+
+	fmt.Fprintf(w, ":ok\n\n")
+	flusher.Flush()
+
 	ctx := r.Context()
 
-	lineCh, err := reader.TailFile(ctx, ses.FilePath, false)
+	// Send last N lines as initial context, then tail for new data
+	const initialLines = 50
+	contextEvents, _ := readLastEvents(ses.FilePath, initialLines)
+	for _, evt := range contextEvents {
+		line := stripANSI(renderer.FormatEvent(evt))
+		data, _ := json.Marshal(map[string]interface{}{
+			"type":    "event",
+			"content": line,
+			"line":    evt.LineNum,
+			"level":   evt.Level.String(),
+		})
+		fmt.Fprintf(w, "data: %s\n\n", data)
+		flusher.Flush()
+	}
+
+	lineCh, err := reader.TailFile(ctx, ses.FilePath, true)
 	if err != nil {
-		jsonError(w, http.StatusInternalServerError, "cannot read file")
 		return
 	}
 
@@ -477,27 +499,74 @@ func (s *Server) handleWatch(w http.ResponseWriter, r *http.Request) {
 		}
 	}()
 
+	const batchSize = 50
+	const batchInterval = 200 * time.Millisecond
+	ticker := time.NewTicker(batchInterval)
+	defer ticker.Stop()
+
+	batch := make([]map[string]interface{}, 0, batchSize)
+	flushBatch := func() {
+		if len(batch) == 0 {
+			return
+		}
+		data, _ := json.Marshal(batch)
+		fmt.Fprintf(w, "data: %s\n\n", data)
+		flusher.Flush()
+		batch = batch[:0]
+	}
+
 	for {
 		select {
 		case evt, ok := <-eventCh:
 			if !ok {
-				fmt.Fprintf(w, "event: complete\ndata: {\"type\":\"done\"}\n\n")
-				flusher.Flush()
+				flushBatch()
 				return
 			}
-			line := renderer.FormatEvent(evt)
-			data, _ := json.Marshal(map[string]interface{}{
+			line := stripANSI(renderer.FormatEvent(evt))
+			batch = append(batch, map[string]interface{}{
 				"type":    "event",
 				"content": line,
 				"line":    evt.LineNum,
 				"level":   evt.Level.String(),
 			})
-			fmt.Fprintf(w, "data: %s\n\n", data)
-			flusher.Flush()
+			if len(batch) >= batchSize {
+				flushBatch()
+			}
+		case <-ticker.C:
+			flushBatch()
 		case <-ctx.Done():
+			flushBatch()
 			return
 		}
 	}
+}
+
+func readLastEvents(path string, n int) ([]model.Event, error) {
+	f, err := os.Open(path)
+	if err != nil {
+		return nil, err
+	}
+	defer f.Close()
+
+	scanner := bufio.NewScanner(f)
+	scanner.Buffer(make([]byte, 1024*1024), 1024*1024)
+	var buf []model.Event
+	lineNum := 0
+	for scanner.Scan() {
+		lineNum++
+		evt := parser.ParseLine(scanner.Text(), lineNum, path)
+		buf = append(buf, evt)
+		if len(buf) > n {
+			buf = buf[1:]
+		}
+	}
+	return buf, scanner.Err()
+}
+
+var ansiRe = regexp.MustCompile(`\x1b\[[0-9;]*m`)
+
+func stripANSI(s string) string {
+	return ansiRe.ReplaceAllString(s, "")
 }
 
 func (s *Server) handleHealth(w http.ResponseWriter, r *http.Request) {

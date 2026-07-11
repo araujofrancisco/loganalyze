@@ -1036,51 +1036,91 @@ function loadWatchTab(id) {
       <button class="btn" id="watch-stop-btn" style="display:none">Stop</button>
       <span id="watch-status" style="font-size:12px;color:var(--text-secondary)"></span>
     </div>
-    <div id="watch-output" style="max-height:600px;overflow-y:auto;font-family:monospace;font-size:12px;line-height:1.5;padding:8px;background:var(--bg-secondary);border-radius:6px;white-space:pre-wrap;word-break:break-all"></div>
+    <div id="watch-output" style="max-height:600px;overflow-y:auto;font-family:monospace;font-size:12px;line-height:1.5;padding:8px;background:var(--bg-secondary);border-radius:6px;white-space:pre-wrap;word-break:break-all;margin:0"></div>
   </div>`;
 
   let evtSource = null;
+  let flushPending = false;
+  let lineCount = 0;
+  const MAX_LINES = 200;
   const output = $('#watch-output');
   const startBtn = $('#watch-start-btn');
   const stopBtn = $('#watch-stop-btn');
   const status = $('#watch-status');
 
+  function cleanupWatch() {
+    if (evtSource) { evtSource.close(); evtSource = null; }
+    flushPending = false;
+  }
+
+  function flushWatchBuf(buf) {
+    flushPending = false;
+    if (buf.length === 0) return;
+    var atBottom = output.scrollTop + output.clientHeight >= output.scrollHeight - 50;
+    for (var i = 0; i < buf.length; i++) {
+      var div = document.createElement('div');
+      div.textContent = buf[i];
+      output.appendChild(div);
+      lineCount++;
+    }
+    buf.length = 0;
+    while (lineCount > MAX_LINES && output.firstChild) {
+      output.removeChild(output.firstChild);
+      lineCount--;
+    }
+    if (atBottom) {
+      output.scrollTop = output.scrollHeight;
+    }
+  }
+
+  function scheduleFlush(buf) {
+    if (flushPending) return;
+    flushPending = true;
+    requestAnimationFrame(function() {
+      flushWatchBuf(buf);
+    });
+  }
+
   startBtn.addEventListener('click', function() {
     if (evtSource) return;
 
-    output.textContent = '';
+    output.innerHTML = '';
+    lineCount = 0;
     startBtn.style.display = 'none';
     stopBtn.style.display = '';
     status.textContent = 'Connected';
 
+    var buf = [];
     evtSource = new EventSource(`${API}/api/watch/${id}`);
 
     evtSource.addEventListener('message', function(e) {
       try {
-        const data = JSON.parse(e.data);
-        if (data.type === 'event') {
-          const line = document.createElement('div');
-          line.textContent = data.content;
-          output.appendChild(line);
-          output.scrollTop = output.scrollHeight;
-          status.textContent = 'Streaming';
+        var data = JSON.parse(e.data);
+        if (Array.isArray(data)) {
+          for (var j = 0; j < data.length; j++) {
+            if (data[j].type === 'event') {
+              buf.push(data[j].content);
+            }
+          }
+        } else if (data.type === 'event') {
+          buf.push(data.content);
         }
+        if (buf.length > 0) scheduleFlush(buf);
+        status.textContent = 'Streaming';
       } catch (_) {}
     });
 
     evtSource.addEventListener('complete', function() {
-      evtSource.close();
-      evtSource = null;
+      flushWatchBuf(buf);
+      cleanupWatch();
       startBtn.style.display = '';
       stopBtn.style.display = 'none';
       status.textContent = 'Disconnected';
     });
 
     evtSource.addEventListener('error', function() {
-      if (evtSource) {
-        evtSource.close();
-        evtSource = null;
-      }
+      flushWatchBuf(buf);
+      cleanupWatch();
       startBtn.style.display = '';
       stopBtn.style.display = 'none';
       status.textContent = 'Connection failed';
@@ -1088,10 +1128,7 @@ function loadWatchTab(id) {
   });
 
   stopBtn.addEventListener('click', function() {
-    if (evtSource) {
-      evtSource.close();
-      evtSource = null;
-    }
+    cleanupWatch();
     startBtn.style.display = '';
     stopBtn.style.display = 'none';
     status.textContent = 'Stopped';
