@@ -53,13 +53,10 @@ func New(addr, dataDir string, opts ...Option) *Server {
 func (s *Server) Start() error {
 	mux := http.NewServeMux()
 
-	mux.HandleFunc("POST /api/upload", s.handleUpload)
-	mux.HandleFunc("POST /api/analyze/{id}", s.handleAnalyze)
 	mux.HandleFunc("GET /api/results/{id}", s.handleResults)
 	mux.HandleFunc("GET /api/results/{id}/events", s.handleEvents)
 	mux.HandleFunc("GET /api/status/{id}", s.handleStatus)
 	mux.HandleFunc("GET /api/sessions", s.handleListSessions)
-	mux.HandleFunc("DELETE /api/sessions/{id}", s.handleDeleteSession)
 	mux.HandleFunc("GET /api/uploaded/{id}", s.handleRawUpload)
 	mux.HandleFunc("GET /api/insights/{id}", s.handleInsights)
 	mux.HandleFunc("GET /api/insights/{id}/stream", s.handleInsightsStream)
@@ -80,12 +77,18 @@ func (s *Server) Start() error {
 		w.Write(data)
 	})
 
-	var mws []middleware
-	mws = append(mws, recoveryMiddleware, requestIDMiddleware, loggingMiddleware)
+	handler := chain(mux, recoveryMiddleware, requestIDMiddleware, loggingMiddleware)
+
 	if s.rateLimit > 0 {
-		mws = append(mws, rateLimitMiddleware(newRateLimiter(s.rateLimit, 1*time.Minute)))
+		rl := newRateLimiter(s.rateLimit, 1*time.Minute)
+		mux.Handle("POST /api/upload", rateLimitMiddleware(rl)(http.HandlerFunc(s.handleUpload)))
+		mux.Handle("POST /api/analyze/{id}", rateLimitMiddleware(rl)(http.HandlerFunc(s.handleAnalyze)))
+		mux.Handle("DELETE /api/sessions/{id}", rateLimitMiddleware(rl)(http.HandlerFunc(s.handleDeleteSession)))
+	} else {
+		mux.HandleFunc("POST /api/upload", s.handleUpload)
+		mux.HandleFunc("POST /api/analyze/{id}", s.handleAnalyze)
+		mux.HandleFunc("DELETE /api/sessions/{id}", s.handleDeleteSession)
 	}
-	handler := chain(mux, mws...)
 
 	httpSrv := &http.Server{
 		Addr:         s.addr,
