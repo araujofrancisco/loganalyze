@@ -662,9 +662,15 @@ function setupSessionTabs() {
 }
 
 async function loadSessionData(id) {
+  let data;
   try {
-    let data = await fetchJSON(`${API}/api/results/${id}`);
+    data = await fetchJSON(`${API}/api/results/${id}`);
+  } catch (err) {
+    $('#tab-overview').innerHTML = `<div class="error-message">Failed to load session: ${escapeHtml(err.message)}</div>`;
+    return;
+  }
 
+  try {
     if (data.status === 'running') {
       $('#tab-overview').innerHTML = `<div class="empty-state"><h3>Analysis in progress...</h3></div>`;
       data = await pollSession(id);
@@ -673,43 +679,52 @@ async function loadSessionData(id) {
         return;
       }
     }
+  } catch (err) {
+    console.error('pollSession error:', err);
+    return;
+  }
 
-    const title = $('#session-title');
-    if (title) title.textContent = 'Session: ' + (data.report?.source || id);
+  const title = $('#session-title');
+  if (title) title.textContent = 'Session: ' + ((data.report && data.report.source) || id);
 
+  try {
     if (data.status === 'error') {
       $('#tab-overview').innerHTML = `<div class="error-message">${escapeHtml(data.error || 'Analysis failed')}</div>`;
-      return;
-    }
-
-    if (data.status === 'uploaded') {
+    } else if (data.status === 'uploaded') {
       $('#tab-overview').innerHTML = `<div class="empty-state"><h3>Analysis not started</h3><p>This session has not been analyzed yet.</p></div>`;
-      return;
-    }
-
-    if (data.report) {
+    } else if (data.report) {
       $('#tab-overview').innerHTML = buildReportHTML(data.report);
       const chartEl = $('#level-chart');
       if (chartEl) renderLevelChart(chartEl, data.report.levels || {});
     } else {
       $('#tab-overview').innerHTML = '<div class="empty-state"><h3>No report data</h3></div>';
     }
+  } catch (err) {
+    console.error('render overview error:', err);
+    $('#tab-overview').innerHTML = '<div class="empty-state"><h3>Render error</h3></div>';
+  }
 
+  try {
     const cmd = data.command || 'scan';
     if (cmd === 'errors' || cmd === 'grep') {
       loadEventsTab(id);
     } else {
-      const top = data.report?.top_errors;
+      const top = data.report && data.report.top_errors;
       if (top && top.length > 0) {
         $('#tab-events').innerHTML = buildErrorGroupsHTML(top);
       } else {
         $('#tab-events').innerHTML = '<div class="empty-state"><h3>No errors found</h3></div>';
       }
     }
-
-    loadRawTab(id);
   } catch (err) {
-    $('#tab-overview').innerHTML = `<div class="error-message">Failed to load session: ${escapeHtml(err.message)}</div>`;
+    console.error('render events error:', err);
+    $('#tab-events').innerHTML = '<div class="empty-state"><h3>Render error</h3></div>';
+  }
+
+  try {
+    await loadRawTab(id);
+  } catch (err) {
+    console.error('loadRawTab error:', err);
   }
 }
 
