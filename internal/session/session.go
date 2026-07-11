@@ -20,18 +20,19 @@ type AnalyzeConfig struct {
 }
 
 type Session struct {
-	ID        string
-	FilePath  string
-	FileName  string
-	Status    string
-	Progress  string
-	Report    *model.Report
-	Events    []model.Event
-	Summary   *summarizer.Summary
-	Error     string
-	CreatedAt time.Time
-	Config    AnalyzeConfig
-	mu        sync.RWMutex
+	ID         string
+	FilePath   string
+	FileName   string
+	Status     string
+	Progress   string
+	Report     *model.Report
+	Events     []model.Event
+	Summary    *summarizer.Summary
+	Error      string
+	CreatedAt  time.Time
+	LastAccess time.Time
+	Config     AnalyzeConfig
+	mu         sync.RWMutex
 }
 
 func (s *Session) SetProgress(p string) {
@@ -92,13 +93,15 @@ func NewStore() *Store {
 
 func (st *Store) Create(filePath, fileName string, cfg AnalyzeConfig) *Session {
 	id := generateID()
+	now := time.Now()
 	s := &Session{
-		ID:        id,
-		FilePath:  filePath,
-		FileName:  fileName,
-		Status:    "uploaded",
-		CreatedAt: time.Now(),
-		Config:    cfg,
+		ID:         id,
+		FilePath:   filePath,
+		FileName:   fileName,
+		Status:     "uploaded",
+		CreatedAt:  now,
+		LastAccess: now,
+		Config:     cfg,
 	}
 	st.mu.Lock()
 	st.sessions[id] = s
@@ -108,8 +111,14 @@ func (st *Store) Create(filePath, fileName string, cfg AnalyzeConfig) *Session {
 
 func (st *Store) Get(id string) *Session {
 	st.mu.RLock()
-	defer st.mu.RUnlock()
-	return st.sessions[id]
+	s, ok := st.sessions[id]
+	st.mu.RUnlock()
+	if ok {
+		st.mu.Lock()
+		s.LastAccess = time.Now()
+		st.mu.Unlock()
+	}
+	return s
 }
 
 func (st *Store) Delete(id string) {
@@ -133,7 +142,7 @@ func (st *Store) Cleanup(maxAge time.Duration) {
 	defer st.mu.Unlock()
 	now := time.Now()
 	for id, s := range st.sessions {
-		if now.Sub(s.CreatedAt) > maxAge {
+		if now.Sub(s.LastAccess) > maxAge {
 			delete(st.sessions, id)
 		}
 	}

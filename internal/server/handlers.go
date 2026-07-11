@@ -26,13 +26,13 @@ import (
 func (s *Server) handleUpload(w http.ResponseWriter, r *http.Request) {
 	r.Body = http.MaxBytesReader(w, r.Body, 100<<20)
 	if err := r.ParseMultipartForm(10 << 20); err != nil {
-		http.Error(w, "file too large (max 100MB)", http.StatusBadRequest)
+		jsonError(w, http.StatusBadRequest, "file too large (max 100MB)")
 		return
 	}
 
 	file, header, err := r.FormFile("file")
 	if err != nil {
-		http.Error(w, "missing file", http.StatusBadRequest)
+		jsonError(w, http.StatusBadRequest, "missing file")
 		return
 	}
 	defer file.Close()
@@ -50,7 +50,7 @@ func (s *Server) handleUpload(w http.ResponseWriter, r *http.Request) {
 	f, err := os.Create(dst)
 	if err != nil {
 		log.Printf("error creating file: %v", err)
-		http.Error(w, "internal error", http.StatusInternalServerError)
+		jsonError(w, http.StatusInternalServerError, "internal error")
 		return
 	}
 	defer f.Close()
@@ -58,7 +58,7 @@ func (s *Server) handleUpload(w http.ResponseWriter, r *http.Request) {
 	if _, err := io.Copy(f, file); err != nil {
 		log.Printf("error saving file: %v", err)
 		os.Remove(dst)
-		http.Error(w, "internal error", http.StatusInternalServerError)
+		jsonError(w, http.StatusInternalServerError, "internal error")
 		return
 	}
 
@@ -81,15 +81,21 @@ func (s *Server) handleAnalyze(w http.ResponseWriter, r *http.Request) {
 		Until   string `json:"until"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		http.Error(w, "invalid request body", http.StatusBadRequest)
+		jsonError(w, http.StatusBadRequest, "invalid request body")
 		return
 	}
 
 	switch req.Command {
 	case "scan", "errors", "top", "grep":
 	default:
-		http.Error(w, "unknown command: "+req.Command, http.StatusBadRequest)
+		jsonError(w, http.StatusBadRequest, "unknown command: "+req.Command)
 		return
+	}
+
+	if req.Limit < 1 {
+		req.Limit = 10
+	} else if req.Limit > 1000 {
+		req.Limit = 1000
 	}
 
 	ses.Config = session.AnalyzeConfig{
@@ -147,17 +153,17 @@ func (s *Server) handleInsights(w http.ResponseWriter, r *http.Request) {
 	}
 
 	if s.summarizer == nil {
-		http.Error(w, "AI summarizer not configured (set --ai-endpoint)", http.StatusNotImplemented)
+		jsonError(w, http.StatusNotImplemented, "AI summarizer not configured (set --ai-endpoint)")
 		return
 	}
 
 	if ses.Status != "complete" {
-		http.Error(w, "analysis not complete yet", http.StatusConflict)
+		jsonError(w, http.StatusConflict, "analysis not complete yet")
 		return
 	}
 
 	if ses.Report == nil {
-		http.Error(w, "session has no report data", http.StatusBadRequest)
+		jsonError(w, http.StatusBadRequest, "session has no report data")
 		return
 	}
 
@@ -168,7 +174,7 @@ func (s *Server) handleInsights(w http.ResponseWriter, r *http.Request) {
 	summary, err := s.summarizer.Summarize(ctx, req)
 	if err != nil {
 		log.Printf("insights error for session %s: %v", ses.ID, err)
-		http.Error(w, "AI summarization failed: "+err.Error(), http.StatusInternalServerError)
+		jsonError(w, http.StatusInternalServerError, "AI summarization failed: "+err.Error())
 		return
 	}
 
@@ -187,18 +193,18 @@ func (s *Server) handleInsightsStream(w http.ResponseWriter, r *http.Request) {
 	}
 
 	if s.summarizer == nil {
-		http.Error(w, "AI summarizer not configured (set --ai-endpoint)", http.StatusNotImplemented)
+		jsonError(w, http.StatusNotImplemented, "AI summarizer not configured (set --ai-endpoint)")
 		return
 	}
 
 	if ses.Status != "complete" {
-		http.Error(w, "analysis not complete yet", http.StatusConflict)
+		jsonError(w, http.StatusConflict, "analysis not complete yet")
 		return
 	}
 
 	flusher, ok := w.(http.Flusher)
 	if !ok {
-		http.Error(w, "streaming not supported", http.StatusInternalServerError)
+		jsonError(w, http.StatusInternalServerError, "streaming not supported")
 		return
 	}
 
@@ -206,8 +212,7 @@ func (s *Server) handleInsightsStream(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Cache-Control", "no-cache")
 	w.Header().Set("Connection", "keep-alive")
 
-	// If already cached, stream the cached text
-	if ses.Summary != nil {
+	if ses.Summary != nil && ses.Summary.Text != "" {
 		fmt.Fprintf(w, "data: {\"type\":\"text\",\"content\":%q}\n\n", ses.Summary.Text)
 		fmt.Fprintf(w, "event: complete\ndata: {\"type\":\"done\"}\n\n")
 		flusher.Flush()
@@ -243,7 +248,6 @@ func (s *Server) handleInsightsStream(w http.ResponseWriter, r *http.Request) {
 		flusher.Flush()
 	}
 
-	// Cache summary even if client disconnected
 	ses.SetSummary(&summarizer.Summary{
 		Text:      fullText.String(),
 		ModelUsed: s.aiModel,
@@ -267,7 +271,7 @@ func (s *Server) handleStatus(w http.ResponseWriter, r *http.Request) {
 
 	flusher, ok := w.(http.Flusher)
 	if !ok {
-		http.Error(w, "streaming not supported", http.StatusInternalServerError)
+		jsonError(w, http.StatusInternalServerError, "streaming not supported")
 		return
 	}
 
@@ -275,28 +279,10 @@ func (s *Server) handleStatus(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Cache-Control", "no-cache")
 	w.Header().Set("Connection", "keep-alive")
 
-	status := ses.GetStatus()
-	progress := ses.GetProgress()
-	if status == "complete" {
-		fmt.Fprintf(w, "event: complete\ndata: {\"status\":\"complete\"}\n\n")
-		flusher.Flush()
-		return
-	}
-	if status == "error" {
-		fmt.Fprintf(w, "event: error\ndata: {\"status\":\"error\"}\n\n")
-		flusher.Flush()
-		return
-	}
-	if progress != "" {
-		data := fmt.Sprintf(`{"status":"running","progress":%q}`, progress)
-		fmt.Fprintf(w, "event: progress\ndata: %s\n\n", data)
-		flusher.Flush()
-	}
-
+	done := r.Context().Done()
 	ticker := time.NewTicker(500 * time.Millisecond)
 	defer ticker.Stop()
 
-	done := r.Context().Done()
 	for {
 		select {
 		case <-done:
@@ -415,7 +401,7 @@ func (s *Server) handleRawUpload(w http.ResponseWriter, r *http.Request) {
 	}
 	data, err := os.ReadFile(ses.FilePath)
 	if err != nil {
-		http.Error(w, "file not found", http.StatusNotFound)
+		jsonError(w, http.StatusNotFound, "file not found")
 		return
 	}
 	w.Header().Set("Content-Type", "text/plain; charset=utf-8")
@@ -440,12 +426,12 @@ func (s *Server) handleHealth(w http.ResponseWriter, r *http.Request) {
 func (s *Server) getSession(w http.ResponseWriter, r *http.Request) *session.Session {
 	id := r.PathValue("id")
 	if id == "" {
-		http.Error(w, "missing session id", http.StatusBadRequest)
+		jsonError(w, http.StatusBadRequest, "missing session id")
 		return nil
 	}
 	ses := s.sessions.Get(id)
 	if ses == nil {
-		http.Error(w, "session not found", http.StatusNotFound)
+		jsonError(w, http.StatusNotFound, "session not found")
 		return nil
 	}
 	return ses

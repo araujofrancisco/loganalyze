@@ -23,17 +23,20 @@ See [`ARCHITECTURE.md`](./ARCHITECTURE.md) for detailed architecture, data model
 - `errors [files...]` — error lines (auto-forces `--level error`)
 - `top [files...]` — top N patterns (auto-forces `--level error`)
 - `grep [files...] <pattern>` — regex search (pattern is last positional arg)
-- `serve [--addr :8080] [--data /data]` — HTTP server with web UI
+- `serve [--addr :8080] [--data /data] [--rate-limit 60]` — HTTP server with web UI
 - Global flags: `--since`, `--until`, `--level`, `--json`, `--csv`, `--no-color`, `--limit`,
-  `--ai-endpoint`, `--ai-model`
+  `--regex`, `--ai-endpoint`, `--ai-model`
 
 ## Key gotchas
 - `--json` differs per command: `scan`/`top` → single JSON object; `errors`/`grep` → NDJSON (one object per line)
 - `errors` and `top` override min level to ERROR regardless of `--level` (both CLI and server)
-- `grep` takes pattern as last arg; the `--regex` persistent flag is declared but never bound (dead code)
-- Server sessions expire after 1h (cleanup every 10min); upload max 100 MB
+- `grep` takes pattern as last arg; `--regex` can be used as a global filter on `scan`/`errors`/`top`
+- Server sessions expire after 1h since **last access** (cleanup every 10min); upload max 100 MB
 - Docker Compose maps port **8081:8080** externally (not 8080:8080)
 - Server uses Go 1.22 `{id}` path patterns with `r.PathValue("id")`
+- Server has middleware: panic recovery, request ID, logging, rate limiting (60/min default, configurable via `--rate-limit`)
+- Server implements graceful shutdown on SIGINT/SIGTERM (30s timeout)
+- All API errors return structured JSON (`{"error":"message"}`), not plain text
 - Reader supports glob patterns; binary files (null bytes) are silently skipped
 - Normalizer is only called during the Analyzer grouping step, not per-line
 - `os.Exit` is called from `cmd/` package, not just `main.go`

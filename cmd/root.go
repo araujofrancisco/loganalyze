@@ -7,14 +7,14 @@ import (
 )
 
 var (
-	flagJSON      bool
-	flagCSV       bool
-	flagNoColor   bool
-	flagLevel     string
-	flagSince     string
-	flagUntil     string
-	flagLimit     int
-	flagRegex     string
+	flagJSON       bool
+	flagCSV        bool
+	flagNoColor    bool
+	flagLevel      string
+	flagSince      string
+	flagUntil      string
+	flagLimit      int
+	flagRegex      string
 	flagAIEndpoint string
 	flagAIModel    string
 )
@@ -40,6 +40,7 @@ func init() {
 	rootCmd.PersistentFlags().StringVar(&flagSince, "since", "", "relative time filter (e.g. 1h, 30m)")
 	rootCmd.PersistentFlags().StringVar(&flagUntil, "until", "", "absolute end time (RFC 3339)")
 	rootCmd.PersistentFlags().IntVarP(&flagLimit, "limit", "n", 10, "max results")
+	rootCmd.PersistentFlags().StringVar(&flagRegex, "regex", "", "regex pattern filter")
 	rootCmd.PersistentFlags().StringVar(&flagAIEndpoint, "ai-endpoint", "", "OpenAI-compatible API endpoint for AI summary (also: LOGANALYZE_AI_ENDPOINT)")
 	rootCmd.PersistentFlags().StringVar(&flagAIModel, "ai-model", "gpt-4o-mini", "AI model name for summary (also: LOGANALYZE_AI_MODEL)")
 }

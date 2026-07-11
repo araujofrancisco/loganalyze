@@ -4,6 +4,8 @@ import (
 	"context"
 	"log"
 	"net/http"
+	"os/signal"
+	"syscall"
 	"time"
 
 	"github.com/araujofrancisco/loganalyze/internal/session"
@@ -17,6 +19,7 @@ type Server struct {
 	sessions   *session.Store
 	summarizer summarizer.Summarizer
 	aiModel    string
+	rateLimit  int
 }
 
 type Option func(*Server)
@@ -28,11 +31,18 @@ func WithSummarizer(s summarizer.Summarizer, model string) Option {
 	}
 }
 
+func WithRateLimit(requestsPerMin int) Option {
+	return func(srv *Server) {
+		srv.rateLimit = requestsPerMin
+	}
+}
+
 func New(addr, dataDir string, opts ...Option) *Server {
 	srv := &Server{
-		addr:     addr,
-		dataDir:  dataDir,
-		sessions: session.NewStore(),
+		addr:      addr,
+		dataDir:   dataDir,
+		sessions:  session.NewStore(),
+		rateLimit: 60,
 	}
 	for _, opt := range opts {
 		opt(srv)
@@ -70,11 +80,34 @@ func (s *Server) Start() error {
 		w.Write(data)
 	})
 
+	var mws []middleware
+	mws = append(mws, recoveryMiddleware, requestIDMiddleware, loggingMiddleware)
+	if s.rateLimit > 0 {
+		mws = append(mws, rateLimitMiddleware(newRateLimiter(s.rateLimit, 1*time.Minute)))
+	}
+	handler := chain(mux, mws...)
+
+	httpSrv := &http.Server{
+		Addr:         s.addr,
+		Handler:      handler,
+		ReadTimeout:  15 * time.Second,
+		WriteTimeout: 130 * time.Second,
+		IdleTimeout:  60 * time.Second,
+	}
+
+	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
+	defer stop()
+
 	go func() {
 		ticker := time.NewTicker(10 * time.Minute)
 		defer ticker.Stop()
-		for range ticker.C {
-			s.sessions.Cleanup(1 * time.Hour)
+		for {
+			select {
+			case <-ticker.C:
+				s.sessions.Cleanup(1 * time.Hour)
+			case <-ctx.Done():
+				return
+			}
 		}
 	}()
 
@@ -82,7 +115,26 @@ func (s *Server) Start() error {
 		log.Printf("AI summarizer configured (model: %s, endpoint configured)", s.aiModel)
 	}
 	log.Printf("server listening on %s (data: %s)", s.addr, s.dataDir)
-	return http.ListenAndServe(s.addr, mux)
+
+	go func() {
+		if err := httpSrv.ListenAndServe(); err != nil && err != http.ErrServerClosed {
+			log.Fatalf("server error: %v", err)
+		}
+	}()
+
+	<-ctx.Done()
+	log.Printf("shutting down server...")
+
+	shutdownCtx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+
+	if err := httpSrv.Shutdown(shutdownCtx); err != nil {
+		log.Printf("server shutdown error: %v", err)
+		return err
+	}
+
+	log.Printf("server stopped")
+	return nil
 }
 
 func (s *Server) generateSummary(ses *session.Session) {
@@ -99,4 +151,10 @@ func (s *Server) generateSummary(ses *session.Session) {
 	}
 	ses.SetSummary(summary)
 	log.Printf("background AI summary complete for session %s (model: %s)", ses.ID, summary.ModelUsed)
+}
+
+func jsonError(w http.ResponseWriter, status int, message string) {
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(status)
+	w.Write([]byte(`{"error":"` + message + `"}`))
 }

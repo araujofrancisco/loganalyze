@@ -51,6 +51,7 @@ go build -o loganalyze ./main.go
 | `--csv` | false | CSV output |
 | `--no-color` | false | Disable ANSI colors |
 | `--limit` | 10 | Max results (top errors, grep matches) |
+| `--regex` | `""` | Regex pattern filter (applies to scan/errors/top) |
 | `--ai-endpoint` | `""` | OpenAI-compatible API endpoint for AI summary (also: `LOGANALYZE_AI_ENDPOINT`) |
 | `--ai-model` | `gpt-4o-mini` | AI model name (also: `LOGANALYZE_AI_MODEL`) |
 
