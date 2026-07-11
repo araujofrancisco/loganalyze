@@ -317,7 +317,15 @@ type Summarizer interface {
 
 ### Router
 
-Uses Go 1.22 `http.ServeMux` with method-based routing. No middleware (no CORS, no logging, no recovery, no content-type enforcement). No signal handling / graceful shutdown.
+Uses Go 1.22 `http.ServeMux` with method-based routing. The server applies a middleware chain: panic recovery → request ID injection → request logging → rate limiting. All API errors return structured JSON (`{"error":"message"}`).
+
+### Graceful shutdown
+
+The server implements graceful shutdown via `signal.NotifyContext` for `SIGINT`/`SIGTERM`. On signal, active connections are drained with a 30-second timeout via `http.Server.Shutdown`. Background goroutines receive context cancellation.
+
+### Rate limiting
+
+A sliding-window rate limiter per client IP (default 10 requests/minute) applies to all endpoints. When exceeded, the server returns `429 Too Many Requests` with a `Retry-After` header. The rate limit can be configured via the `WithRateLimit` option.
 
 ### Endpoints
 
@@ -406,10 +414,6 @@ func (s *Server) runAnalysis(ses *session.Session) {
 - File existence checked before processing
 - Progress reported every 1000 parsed lines
 - AI summary generated in background after analysis completes (if configured)
-
-### Signal handling
-
-The server does **not** implement graceful shutdown. `http.ListenAndServe` runs directly with no `signal.Notify` trap.
 
 ---
 
@@ -614,5 +618,6 @@ go test ./...
 | 404 | Session not found, file not found |
 | 409 | Analysis not complete yet |
 | 413 | Upload too large (>100 MB) |
+| 429 | Rate limit exceeded |
 | 500 | Internal server error |
 | 501 | AI summarizer not configured |

@@ -273,13 +273,20 @@ mux.HandleFunc("GET /health", ...)
 
 Static files served at `/static/` via embedded FS; root `/` serves `index.html`.
 
-### No middleware
+### Middleware stack
 
-Unlike what older documentation stated, the server has **no middleware** — no CORS, no logging, no recovery, no content-type enforcement. These are candidates for future addition.
+The server applies a middleware chain to all routes:
+- **Panic recovery**: catches panics per-request, returns `500` with JSON error, logs stack trace
+- **Request ID**: injects `X-Request-ID` header (16 hex chars) if not provided by client
+- **Logging**: logs `remote method path status duration request_id` for every request
+- **Rate limiting**: sliding window per-client-IP, default 10 requests/min, returns `429 Too Many Requests` with `Retry-After` header
 
 ### Signal handling
 
-The server does **not** implement graceful shutdown. `http.ListenAndServe` runs directly with no signal trapping. SIGINT/SIGTERM will terminate immediately.
+The server implements **graceful shutdown** via `signal.NotifyContext` for `SIGINT`/`SIGTERM`. On signal:
+1. A 30-second shutdown timeout context is created
+2. `http.Server.Shutdown()` is called, which drains active connections
+3. Background goroutines (session cleanup, AI summary generation) receive context cancellation
 
 ### Session Management
 
@@ -287,7 +294,7 @@ The server does **not** implement graceful shutdown. `http.ListenAndServe` runs 
 
 - In-memory `map[string]*Session` protected by `sync.RWMutex`
 - Session ID: 16 random bytes → 32-char hex string
-- TTL: 1 hour since **creation** (not last access)
+- TTL: 1 hour since **last access** (touched on every `Store.Get()`)
 - Cleanup runs every 10 minutes in a background goroutine
 - Status values: `"uploaded"` → `"running"` → `"complete"` or `"error"`
 

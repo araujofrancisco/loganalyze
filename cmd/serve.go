@@ -9,8 +9,9 @@ import (
 )
 
 var (
-	flagAddr string
-	flagData string
+	flagAddr      string
+	flagData      string
+	flagRateLimit int
 )
 
 var serveCmd = &cobra.Command{
@@ -37,6 +38,9 @@ var serveCmd = &cobra.Command{
 				aiModel,
 			))
 		}
+		if flagRateLimit > 0 {
+			opts = append(opts, server.WithRateLimit(flagRateLimit))
+		}
 
 		srv := server.New(flagAddr, flagData, opts...)
 		if endpoint != "" {
@@ -52,5 +56,6 @@ var serveCmd = &cobra.Command{
 func init() {
 	serveCmd.Flags().StringVarP(&flagAddr, "addr", "a", ":8080", "listen address")
 	serveCmd.Flags().StringVarP(&flagData, "data", "d", "/data", "data directory for uploads")
+	serveCmd.Flags().IntVar(&flagRateLimit, "rate-limit", 60, "max requests per minute per IP (0 to disable)")
 	rootCmd.AddCommand(serveCmd)
 }
