@@ -17,6 +17,7 @@ type AnalyzeConfig struct {
 	Limit   int
 	Since   string
 	Until   string
+	Fold    bool
 }
 
 type Session struct {

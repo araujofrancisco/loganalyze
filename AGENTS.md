@@ -19,13 +19,14 @@ See [`ARCHITECTURE.md`](./ARCHITECTURE.md) for detailed architecture, data model
 - Server reuses same `internal/` engine as CLI — no duplication
 
 ## Commands
-- `scan [files...]` — full report
+- `scan [files...]` — full report (supports multi-file via positional args)
 - `errors [files...]` — error lines (auto-forces `--level error`)
 - `top [files...]` — top N patterns (auto-forces `--level error`)
 - `grep [files...] <pattern>` — regex search (pattern is last positional arg)
+- `watch [files...] [--every 30s] [--no-tail]` — tail files with live filtering / periodic summaries
 - `serve [--addr :8080] [--data /data] [--rate-limit 60]` — HTTP server with web UI
 - Global flags: `--since`, `--until`, `--level`, `--json`, `--csv`, `--no-color`, `--limit`,
-  `--regex`, `--ai-endpoint`, `--ai-model`
+  `--regex`, `--ai-endpoint`, `--ai-model`, `--fold`
 
 ## Key gotchas
 - `--json` differs per command: `scan`/`top` → single JSON object; `errors`/`grep` → NDJSON (one object per line)
@@ -37,9 +38,13 @@ See [`ARCHITECTURE.md`](./ARCHITECTURE.md) for detailed architecture, data model
 - Server has middleware: panic recovery, request ID, logging, rate limiting (60/min default, configurable via `--rate-limit`)
 - Server implements graceful shutdown on SIGINT/SIGTERM (30s timeout)
 - All API errors return structured JSON (`{"error":"message"}`), not plain text
-- Reader supports glob patterns; binary files (null bytes) are silently skipped
+- Server has `/api/watch/{id}` SSE endpoint for live log tailing (no rate-limit, read-only)
+- Reader supports glob patterns; binary files (null bytes) are silently skipped; gzip files are transparently decompressed
+- `watch` command uses `reader.TailFile` (poll-based, no fsnotify dep); supports `--every` for periodic summaries and `--no-tail` to start from beginning
+- `--fold` merges stack trace continuation lines (leading whitespace) into their parent event; available in scan, errors, and watch
 - Normalizer is only called during the Analyzer grouping step, not per-line
 - `os.Exit` is called from `cmd/` package, not just `main.go`
+- Fold operates between Reader and Parser: `Reader → Fold → Parser → Filter → Analyzer`
 
 ## Normalization (applied in order)
 UUIDs → `<uuid>`, request IDs → `<req>`, IPv6/IPv4 → `<ip>`, hex → `<hex>`,

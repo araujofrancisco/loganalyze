@@ -442,6 +442,12 @@ function renderUpload() {
           <label>Since</label>
           <input type="text" id="since" placeholder="e.g. 1h, 30m" autocomplete="off">
         </div>
+        <div class="form-group" style="display:flex;flex-direction:column;justify-content:flex-end">
+          <label style="display:flex;align-items:center;gap:8px;cursor:pointer;padding:6px 0">
+            <input type="checkbox" id="fold" checked>
+            <span>Fold stack traces</span>
+          </label>
+        </div>
       </div>
       <div style="margin-top:16px;display:flex;gap:8px;align-items:center">
         <button class="btn btn-primary" id="analyze-btn" disabled>Analyze</button>
@@ -533,12 +539,13 @@ async function startAnalysis() {
     const regex = $('#regex').value;
     const limit = parseInt($('#limit').value) || 10;
     const since = $('#since').value;
+    const fold = $('#fold').checked;
 
     progressText.textContent = 'Analyzing...';
     await fetchJSON(`${API}/api/analyze/${sessionId}`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ command: cmd, level, regex, limit, since })
+      body: JSON.stringify({ command: cmd, level, regex, limit, since, fold })
     });
 
     progressFill.style.width = '90%';
@@ -627,11 +634,13 @@ function renderSession(id) {
     <div class="tab-bar">
       <button class="tab-item active" data-tab="overview">Overview</button>
       <button class="tab-item" data-tab="events">Events</button>
+      <button class="tab-item" data-tab="watch">Watch</button>
       <button class="tab-item" data-tab="insights">AI Insights</button>
       <button class="tab-item" data-tab="raw">Raw</button>
     </div>
     <div id="tab-overview" class="tab-content active"><div class="card"><div class="empty-state"><h3>Loading...</h3></div></div></div>
     <div id="tab-events" class="tab-content"><div class="card"><div class="empty-state"><h3>Loading...</h3></div></div></div>
+    <div id="tab-watch" class="tab-content"><div class="card"><div class="empty-state"><h3>Click start to watch live log entries</h3></div></div></div>
     <div id="tab-insights" class="tab-content"><div class="card"><div class="empty-state"><h3>Loading...</h3></div></div></div>
     <div id="tab-raw" class="tab-content"><div class="empty-state" id="raw-loading"><h3>Loading...</h3></div></div>
   `;
@@ -656,6 +665,10 @@ function setupSessionTabs() {
       if (tabName === 'insights') {
         const id = location.pathname.split('/')[2];
         if (id) loadInsightsTab(id);
+      }
+      if (tabName === 'watch') {
+        const id = location.pathname.split('/')[2];
+        if (id) loadWatchTab(id);
       }
     });
   });
@@ -1012,6 +1025,79 @@ function loadInsightsTab(id) {
   });
 }
 
+function loadWatchTab(id) {
+  const el = $('#tab-watch');
+  if (!el) return;
+
+  el.innerHTML = `<div class="card">
+    <div class="card-header" style="display:flex;align-items:center;gap:12px">
+      <h3>Live Watch</h3>
+      <button class="btn btn-primary" id="watch-start-btn">Start</button>
+      <button class="btn" id="watch-stop-btn" style="display:none">Stop</button>
+      <span id="watch-status" style="font-size:12px;color:var(--text-secondary)"></span>
+    </div>
+    <div id="watch-output" style="max-height:600px;overflow-y:auto;font-family:monospace;font-size:12px;line-height:1.5;padding:8px;background:var(--bg-secondary);border-radius:6px;white-space:pre-wrap;word-break:break-all"></div>
+  </div>`;
+
+  let evtSource = null;
+  const output = $('#watch-output');
+  const startBtn = $('#watch-start-btn');
+  const stopBtn = $('#watch-stop-btn');
+  const status = $('#watch-status');
+
+  startBtn.addEventListener('click', function() {
+    if (evtSource) return;
+
+    output.textContent = '';
+    startBtn.style.display = 'none';
+    stopBtn.style.display = '';
+    status.textContent = 'Connected';
+
+    evtSource = new EventSource(`${API}/api/watch/${id}`);
+
+    evtSource.addEventListener('message', function(e) {
+      try {
+        const data = JSON.parse(e.data);
+        if (data.type === 'event') {
+          const line = document.createElement('div');
+          line.textContent = data.content;
+          output.appendChild(line);
+          output.scrollTop = output.scrollHeight;
+          status.textContent = 'Streaming';
+        }
+      } catch (_) {}
+    });
+
+    evtSource.addEventListener('complete', function() {
+      evtSource.close();
+      evtSource = null;
+      startBtn.style.display = '';
+      stopBtn.style.display = 'none';
+      status.textContent = 'Disconnected';
+    });
+
+    evtSource.addEventListener('error', function() {
+      if (evtSource) {
+        evtSource.close();
+        evtSource = null;
+      }
+      startBtn.style.display = '';
+      stopBtn.style.display = 'none';
+      status.textContent = 'Connection failed';
+    });
+  });
+
+  stopBtn.addEventListener('click', function() {
+    if (evtSource) {
+      evtSource.close();
+      evtSource = null;
+    }
+    startBtn.style.display = '';
+    stopBtn.style.display = 'none';
+    status.textContent = 'Stopped';
+  });
+}
+
 /* =============================================================
    Router
    ============================================================= */
@@ -1057,6 +1143,7 @@ document.addEventListener('keydown', (e) => {
     switch (e.key) {
       case '1': e.preventDefault(); navigate('/'); break;
       case 'u': e.preventDefault(); navigate('/upload'); break;
+      case 'w': e.preventDefault(); const id = location.pathname.split('/')[2]; if (id) { const el = $('#tab-watch'); if (el) { const btn = $('#watch-start-btn'); if (btn) btn.click(); } } break;
     }
   }
   if (e.key === 'Escape') {

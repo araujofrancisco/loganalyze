@@ -22,8 +22,10 @@ var scanCmd = &cobra.Command{
 		report := analyzer.Analyze(eventCh, flagLimit)
 		if len(args) > 0 {
 			report.Source = args[0]
+			report.Sources = args
 		} else {
 			report.Source = "stdin"
+			report.Sources = []string{"stdin"}
 		}
 
 		switch {

@@ -60,6 +60,7 @@ func (s *Server) Start() error {
 	mux.HandleFunc("GET /api/uploaded/{id}", s.handleRawUpload)
 	mux.HandleFunc("GET /api/insights/{id}", s.handleInsights)
 	mux.HandleFunc("GET /api/insights/{id}/stream", s.handleInsightsStream)
+	mux.HandleFunc("GET /api/watch/{id}", s.handleWatch)
 	mux.HandleFunc("GET /health", s.handleHealth)
 
 	mux.Handle("GET /static/", http.FileServer(http.FS(web.StaticFS)))

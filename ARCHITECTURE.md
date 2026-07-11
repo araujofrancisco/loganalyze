@@ -24,22 +24,26 @@ loganalyzer/
 ├── cmd/                      # CLI subcommands (cobra)
 │   ├── root.go               # Root command + persistent flags + os.Exit(1)
 │   ├── flags.go              # buildFilterConfig(), getAIConfig()
-│   ├── pipeline.go           # startPipeline() — reads, parses, filters
+│   ├── pipeline.go           # startPipeline() — reads, folds, parses, filters
 │   ├── scan.go               # Full analysis report
 │   ├── errors.go             # Error lines (forces LevelError)
 │   ├── top.go                # Top N error patterns (forces LevelError)
 │   ├── grep.go               # Regex search (pattern = last positional arg)
+│   ├── watch.go              # Tail files with live filtering / periodic summaries
 │   └── serve.go              # HTTP server with web UI
 ├── internal/
 │   ├── model/
 │   │   └── event.go          # Event, Group, Report, Level types
 │   ├── reader/
-│   │   └── reader.go         # File/stdin/glob reading with binary detection
+│   │   ├── reader.go         # File/stdin/glob reading with binary detection + gzip
+│   │   └── tail.go           # TailFile — poll-based file following (tail -f)
 │   ├── parser/
 │   │   ├── parser.go         # Level, timestamp, message extraction
 │   │   └── patterns.go       # Timestamp regex patterns
 │   ├── normalizer/
 │   │   └── normalizer.go     # Signature normalization (UUID→<uuid>, etc.)
+│   ├── fold/
+│   │   └── fold.go           # Stack trace folding (multi-line → single event)
 │   ├── filter/
 │   │   └── filter.go         # Level/regex/time filtering
 │   ├── analyzer/

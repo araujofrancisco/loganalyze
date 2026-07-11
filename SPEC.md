@@ -8,24 +8,25 @@
 2. [Data Model](#2-data-model)
 3. [Core Functions](#3-core-functions)
 4. [Streaming Pipeline](#4-streaming-pipeline)
-5. [Normalization Engine](#5-normalization-engine)
-6. [Analyzer Implementation](#6-analyzer-implementation)
-7. [AI Summarizer](#7-ai-summarizer)
-8. [Server API](#8-server-api)
-9. [Web UI Architecture](#9-web-ui-architecture)
-10. [Docker Deployment](#10-docker-deployment)
-11. [Testing Strategy](#11-testing-strategy)
+5. [Stack Trace Folding](#5-stack-trace-folding)
+6. [Normalization Engine](#6-normalization-engine)
+7. [Analyzer Implementation](#7-analyzer-implementation)
+8. [AI Summarizer](#8-ai-summarizer)
+9. [Server API](#9-server-api)
+10. [Web UI Architecture](#10-web-ui-architecture)
+11. [Docker Deployment](#11-docker-deployment)
+12. [Testing Strategy](#12-testing-strategy)
 
 ---
 
 ## 1. Architecture Overview
 
 ```
-CLI mode:   Reader → Parser → Filter → Analyzer → Renderer
+CLI mode:   Reader → [Fold] → Parser → Filter → Analyzer → Renderer
 Server mode: Browser → HTTP API → Server Handlers → Engine (same internal/)
 ```
 
-Both modes share the same streaming pipeline from `internal/` — no code duplication.
+Both modes share the same streaming pipeline from `internal/` — no code duplication. The optional Fold stage (enabled by `--fold`) merges multi-line stack traces before parsing.
 
 ---
 
@@ -83,6 +84,8 @@ type Report struct {
 }
 ```
 
+`Report` supports multi-source analysis via the `Sources` field (slice of filenames). The `Source` field is kept for backward compatibility. When `Sources` has more than one entry, the console renderer shows "Files:" instead of "File:".
+
 `Report` has a custom `MarshalJSON` that populates `LevelsStr` from `Levels` before serializing. `UnmarshalJSON` reverses the conversion. This allows the internal map to use `Level` keys while the JSON uses strings.
 
 ---
@@ -92,18 +95,34 @@ type Report struct {
 Every package defines a single exported function (not an interface), except `summarizer` which uses an interface:
 
 | Package | Signatures | Purpose |
-|---|---|---|
-| `reader.ReadLines` | `(paths []string, stdin bool) → chan Line` | Read line-by-line with line numbers |
+|---|---|---|---|
+| `reader.ReadLines` | `(paths []string, stdin bool) → chan Line` | Read line-by-line with line numbers, gzip decompression |
+| `reader.TailFile` | `(ctx, path, fromEnd) → (<-chan Line, error)` | Poll-based file following (tail -f) |
+| `fold.Fold` | `(lines <-chan Line, maxLines int) → chan Line` | Merge stack trace continuation lines |
 | `parser.ParseLine` | `(raw string, lineNum int, source string) → model.Event` | Extract level, timestamp, message |
 | `normalizer.Normalize` | `(string) → string` | Replace IDs/paths with tokens |
 | `filter.Matches` | `(evt model.Event, cfg Config) → bool` | Level/time/regex filter (value semantics) |
 | `analyzer.Analyze` | `(events <-chan model.Event, limit int) → Report` | Streaming analysis (value semantics) |
 | `summarizer.Summarizer` | Interface with `Summarize` and `SummarizeStream` | AI-powered error analysis |
 | `renderer.Print*` | `(model.Report or <-chan model.Event, io.Writer)` | Console/JSON/CSV output |
+| `renderer.FormatEvent` | `(model.Event) → string` | Format a single event for display |
 
 ---
 
 ## 4. Streaming Pipeline
+
+### File tailing — `reader.TailFile`
+
+```go
+func TailFile(ctx context.Context, path string, fromEnd bool) (<-chan Line, error)
+```
+
+- Poll-based (500ms interval), no external dependencies (no fsnotify)
+- `fromEnd=true`: seeks to end, only emits new appended lines (tail -f mode)
+- `fromEnd=false`: reads from beginning
+- Supports context cancellation for clean shutdown
+- Channel closed when context is cancelled or file can no longer be read
+- Used by the `watch` command and the `/api/watch/{id}` SSE endpoint
 
 ### Input discovery — `reader.ReadLines`
 
@@ -114,7 +133,8 @@ func ReadLines(paths []string, stdin bool) chan Line
 - If `stdin` is true or `paths` is empty, reads from `os.Stdin`
 - Otherwise, expands glob patterns via `filepath.Glob`; if no matches, uses pattern as literal path
 - Silently skips missing files and binary files
-- Binary detection: reads first 8192 bytes, checks for null byte (`\x00`)
+- Gzip decompression: detects gzip magic bytes (`\x1f\x8b`) and transparently decompresses
+- Binary detection: reads first 8192 bytes, checks for null byte (`\x00`); skipped for gzip files
 - Scanner buffer: 1 MB initial, 1 MB max line length
 
 ### Parser — `parser.ParseLine`
@@ -166,7 +186,33 @@ func Analyze(events <-chan model.Event, limit int) Report
 
 ---
 
-## 5. Normalization Engine
+## 5. Stack Trace Folding
+
+### Location: `internal/fold/fold.go`
+
+**Purpose:** Merge multi-line stack traces into single events for better error grouping.
+
+### Design
+
+```go
+func Fold(lines <-chan reader.Line, maxLines int) chan reader.Line
+```
+
+- Operates between the Reader and Parser stages: `Reader → Fold → Parser → ...`
+- Detects continuation lines by checking for leading whitespace (tab, 2-8 spaces)
+- Appends continuation lines to the previous line's `Text`, separated by `\n`
+- `maxLines` limits the number of continuations per folded event (default 50)
+- Preserves `Source` and `Line` from the first line of the fold
+- Lines at the start of a stream that look like continuations pass through unchanged
+
+### Integration
+
+- Enabled via `--fold` global flag (CLI) or `fold: true` field (server API)
+- In `cmd/pipeline.go`: `lines = fold.Fold(lines, 50)` when `flagFold` is set
+- In `internal/server/handlers.go`: same logic when `ses.Config.Fold` is true
+- Web UI: checkbox in upload options (default on)
+
+## 6. Normalization Engine
 
 ### Location: `internal/normalizer/normalizer.go`
 
@@ -193,7 +239,7 @@ func Analyze(events <-chan model.Event, limit int) Report
 
 ---
 
-## 6. Analyzer Implementation
+## 7. Analyzer Implementation
 
 ### Location: `internal/analyzer/analyzer.go`
 
@@ -252,7 +298,7 @@ for evt := range events {
 
 ---
 
-## 7. AI Summarizer
+## 8. AI Summarizer
 
 ### Location: `internal/summarizer/`
 
@@ -303,7 +349,7 @@ type Summarizer interface {
 
 ---
 
-## 8. Server API
+## 9. Server API
 
 ### Location: `internal/server/handlers.go`, `internal/server/server.go`
 
@@ -380,6 +426,15 @@ A sliding-window rate limiter per client IP (default 10 requests/minute) applies
 - Returns the raw uploaded file as `text/plain; charset=utf-8`
 - Returns 404 if session not found
 
+#### `GET /api/watch/{id}`
+
+- Server-Sent Events stream of live log entries from the uploaded file
+- Streams new lines as they are appended to the file (tail -f)
+- Uses `reader.TailFile` with polling interval of 500ms
+- Event format: `data: {"type":"event","content":"...","line":N,"level":"..."}\n\n`
+- Sends `event: complete` when file is no longer readable
+- Context cancellation (client disconnect) stops the goroutine
+
 #### `GET /health`
 
 - Returns `{"status":"ok"}` (200)
@@ -417,7 +472,7 @@ func (s *Server) runAnalysis(ses *session.Session) {
 
 ---
 
-## 9. Web UI Architecture
+## 10. Web UI Architecture
 
 ### Location: `internal/web/static/`
 
@@ -455,7 +510,8 @@ func (s *Server) runAnalysis(ses *session.Session) {
 1. **Overview** — stat cards, SVG bar chart (level breakdown with percentage labels), collapsible error group accordion
 2. **Events** — level dropdown filter, text search, paginated table (100/page), expandable raw line rows
 3. **AI Insights** — streaming markdown via `EventSource(/api/insights/{id}/stream)` with markdown rendering (headings, lists, bold, italic, code, horizontal rules)
-4. **Raw** — line-numbered original file via `GET /api/uploaded/{id}`
+4. **Watch** — live streaming view via `EventSource(/api/watch/{id})` with Start/Stop controls, auto-scrolling output
+5. **Raw** — line-numbered original file via `GET /api/uploaded/{id}`
 
 ### Theme
 
@@ -478,7 +534,7 @@ func (s *Server) runAnalysis(ses *session.Session) {
 
 ---
 
-## 10. Docker Deployment
+## 11. Docker Deployment
 
 ### `Dockerfile`
 
@@ -529,16 +585,17 @@ volumes:
 
 ---
 
-## 11. Testing Strategy
+## 12. Testing Strategy
 
 ### Unit tests
 
 Each `internal/` package has a `*_test.go` file:
 
 | Package | What's tested |
-|---|---|
+|---|---|---|
 | `model` | Level parsing, JSON roundtrip, time comparison |
-| `reader` | Line reading, binary detection, stdin handling |
+| `reader` | Line reading, binary detection, stdin handling, gzip decompression, tail polling |
+| `fold` | Continuation line merging, max lines limit, tab prefix, empty input, edge cases |
 | `parser` | Each format/timestamp/level pattern, edge cases |
 | `normalizer` | Each replacement rule, ordering, boundary cases |
 | `filter` | Level, regex, time-range filtering |
