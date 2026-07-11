@@ -462,7 +462,7 @@ func (s *Server) handleWatch(w http.ResponseWriter, r *http.Request) {
 
 	ctx := r.Context()
 
-	lineCh, err := reader.TailFile(ctx, ses.FilePath, true)
+	lineCh, err := reader.TailFile(ctx, ses.FilePath, false)
 	if err != nil {
 		jsonError(w, http.StatusInternalServerError, "cannot read file")
 		return

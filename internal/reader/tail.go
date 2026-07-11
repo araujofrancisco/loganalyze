@@ -1,6 +1,7 @@
 package reader
 
 import (
+	"compress/gzip"
 	"context"
 	"io"
 	"os"
@@ -15,7 +16,17 @@ func TailFile(ctx context.Context, path string, fromEnd bool) (<-chan Line, erro
 		return nil, err
 	}
 
-	if fromEnd {
+	var r io.Reader = f
+	if isGzip(f) {
+		gr, err := gzip.NewReader(f)
+		if err != nil {
+			f.Close()
+			return nil, err
+		}
+		defer gr.Close()
+		r = gr
+		// gzip is static — ignore fromEnd, seek doesn't apply
+	} else if fromEnd {
 		info, err := f.Stat()
 		if err == nil {
 			f.Seek(info.Size(), 0)
@@ -23,13 +34,13 @@ func TailFile(ctx context.Context, path string, fromEnd bool) (<-chan Line, erro
 	}
 
 	ch := make(chan Line, 1000)
-	go tailReader(ctx, f, path, ch)
+	go tailReader(ctx, r, f, path, ch)
 	return ch, nil
 }
 
-func tailReader(ctx context.Context, f *os.File, source string, ch chan<- Line) {
+func tailReader(ctx context.Context, r io.Reader, closer io.Closer, source string, ch chan<- Line) {
 	defer close(ch)
-	defer f.Close()
+	defer closer.Close()
 
 	lineNum := 0
 	var buf []byte
@@ -42,7 +53,7 @@ func tailReader(ctx context.Context, f *os.File, source string, ch chan<- Line) 
 		default:
 		}
 
-		n, err := f.Read(readBuf)
+		n, err := r.Read(readBuf)
 		if n > 0 {
 			buf = append(buf, readBuf[:n]...)
 			for {
