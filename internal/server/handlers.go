@@ -1,6 +1,8 @@
 package server
 
 import (
+	"bytes"
+	"compress/gzip"
 	"context"
 	"crypto/rand"
 	"encoding/json"
@@ -408,8 +410,22 @@ func (s *Server) handleRawUpload(w http.ResponseWriter, r *http.Request) {
 		jsonError(w, http.StatusNotFound, "file not found")
 		return
 	}
+	if isGzipBytes(data) {
+		gr, err := gzip.NewReader(bytes.NewReader(data))
+		if err == nil {
+			defer gr.Close()
+			decompressed, err := io.ReadAll(gr)
+			if err == nil {
+				data = decompressed
+			}
+		}
+	}
 	w.Header().Set("Content-Type", "text/plain; charset=utf-8")
 	w.Write(data)
+}
+
+func isGzipBytes(b []byte) bool {
+	return len(b) >= 2 && b[0] == 0x1f && b[1] == 0x8b
 }
 
 func parseInt(s string) (int, error) {
