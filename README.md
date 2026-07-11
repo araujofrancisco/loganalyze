@@ -100,10 +100,9 @@ Top errors:
 ### Exit codes
 
 | Code | Meaning |
-|---|---|
+|---|---|---|
 | 0 | Success |
 | 1 | General error (bad flags, read failure) |
-| 2 | Partial failure (some files succeeded, some failed) |
 | 130 | Interrupted by SIGINT/SIGTERM |
 
 ---
@@ -119,9 +118,9 @@ docker compose up
 
 | Route | Content |
 |---|---|
-| `/` | **Dashboard** — stat cards, searchable session table, quick actions |
+| `/` | **Dashboard** — stat cards, searchable session table |
 | `/upload` | **Upload & Analyze** — drag-and-drop file upload, command/flag options |
-| `/session/:id` | **Session detail** — three tabs: Overview, Events, Raw |
+| `/session/:id` | **Session detail** — four tabs: Overview, Events, AI Insights, Raw |
 
 ### Overview tab
 
@@ -206,8 +205,8 @@ Groups are tracked by a streaming top-K min-heap (bounded by `--limit`). Only ev
 | `GET` | `/api/sessions` | List active sessions |
 | `DELETE` | `/api/sessions/{id}` | Delete session and uploaded file |
 | `GET` | `/api/uploaded/{id}` | Download the original uploaded file |
-| `GET` | `/api/insights/{id}` | AI summary (sync, cached after first call) |
-| `GET` | `/api/insights/{id}/stream` | AI summary (SSE streaming) |
+| `GET` | `/api/insights/{id}` | AI summary (sync, cached after first generation) |
+| `GET` | `/api/insights/{id}/stream` | AI summary (SSE streaming, cached after streaming) |
 | `GET` | `/health` | Health check |
 
 ### Upload + analyze via curl
@@ -294,20 +293,22 @@ loganalyzer/
 ├── README.md
 ├── SPEC.md                   # Technical specification
 ├── cmd/                      # CLI subcommands (cobra)
-│   ├── root.go               # Root command + persistent flags
+│   ├── root.go               # Root command + persistent flags + os.Exit(1)
+│   ├── flags.go              # buildFilterConfig(), getAIConfig()
+│   ├── pipeline.go           # startPipeline() — reads, parses, filters
 │   ├── scan.go               # Full analysis report
-│   ├── errors.go             # Error lines with context
-│   ├── top.go                # Top N error patterns
-│   ├── grep.go               # Regex search
-│   └── serve.go              # HTTP server
+│   ├── errors.go             # Error lines with context (forces LevelError)
+│   ├── top.go                # Top N error patterns (forces LevelError)
+│   ├── grep.go               # Regex search (pattern = last positional arg)
+│   └── serve.go              # HTTP server with web UI
 ├── internal/
 │   ├── model/
-│   │   └── event.go          # Event, Level, Group, Report + JSON
+│   │   └── event.go          # Event, Group, Report, Level types
 │   ├── reader/
 │   │   └── reader.go         # File/stdin/glob with binary detection
 │   ├── parser/
-│   │   ├── parser.go         # Level & timestamp detection
-│   │   └── patterns.go       # Compiled regexes
+│   │   ├── parser.go         # Level, timestamp, message extraction
+│   │   └── patterns.go       # Timestamp regex patterns
 │   ├── normalizer/
 │   │   └── normalizer.go     # Signature normalization
 │   ├── filter/
@@ -319,18 +320,22 @@ loganalyzer/
 │   │   ├── json.go           # JSON/NDJSON export
 │   │   └── csv.go            # CSV export
 │   ├── server/
-│   │   ├── server.go         # HTTP router, middleware, cleanup
+│   │   ├── server.go         # HTTP router, background cleanup goroutine
 │   │   └── handlers.go       # Upload, analyze, results, SSE, CRUD
 │   ├── session/
-│   │   └── session.go        # In-memory session store with TTL
+│   │   └── session.go        # In-memory session store with RWMutex + TTL
+│   ├── summarizer/
+│   │   ├── summarizer.go     # Summarizer interface + SummaryRequest
+│   │   ├── llm.go            # OpenAI-compatible HTTP implementation
+│   │   └── noop.go           # Default fallback (zero weight)
 │   └── web/
 │       ├── embed.go          # go:embed directive
 │       └── static/
 │           ├── index.html    # SPA shell
-│           ├── app.js        # Application (ES module, ~550 lines)
-│           └── style.css     # Design system (~450 lines)
+│           ├── app.js        # Vanilla ES module (~1078 lines)
+│           └── style.css     # CSS custom properties (~1209 lines)
 └── testdata/
-    └── samples/              # Sample log files: apache.log, errors.log, syslog.log
+    └── samples/              # errors.log, syslog.log, apache.log
 ```
 
 ---

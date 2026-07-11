@@ -6,7 +6,7 @@
 
 1. [Architecture Overview](#1-architecture-overview)
 2. [Data Model](#2-data-model)
-3. [Core Interfaces](#3-core-interfaces)
+3. [Core Functions](#3-core-functions)
 4. [Streaming Pipeline](#4-streaming-pipeline)
 5. [Normalization Engine](#5-normalization-engine)
 6. [Analyzer Implementation](#6-analyzer-implementation)
@@ -21,27 +21,8 @@
 ## 1. Architecture Overview
 
 ```
-┌─────────────────────────────────────────────────────────┐
-│                      main.go                            │
-│  cobra.Command tree: root, scan, errors, top, grep,    │
-│  serve                                                  │
-└──────────┬──────────────────────────────────────────────┘
-           │
-     ┌─────┴───────┬──────────────────────────────┐
-     │             │                              │
-     ▼             ▼                              ▼
-┌──────────┐  ┌──────────┐                 ┌──────────┐
-│ CLI mode │  │ Serve    │                 │ Shared        │
-│          │  │ mode     │                 │ Flags         │
-│ scan,    │  │ HTTP     │                 │ --since       │
-│ errors,  │  │ server   │                 │ --until       │
-│ top,     │  │ with web │                 │ --level       │
-│ grep     │  │ UI       │                 │ --json        │
-│          │  │ + AI     │                 │ --ai-endpoint │
-└──────────┘  └──────────┘                 │ --csv    │
-                                           │ --no-col │
-                                           │ --limit  │
-                                           └──────────┘
+CLI mode:   Reader → Parser → Filter → Analyzer → Renderer
+Server mode: Browser → HTTP API → Server Handlers → Engine (same internal/)
 ```
 
 Both modes share the same streaming pipeline from `internal/` — no code duplication.
@@ -52,84 +33,73 @@ Both modes share the same streaming pipeline from `internal/` — no code duplic
 
 ### Location: `internal/model/event.go`
 
+**Level** is `int8` with non-iota values. Higher numeric value = higher severity:
+
 ```go
 const (
-    LevelFatal Level = iota  // 0 — highest severity
-    LevelError               // 1
-    LevelWarn                // 2
-    LevelInfo                // 3
-    LevelDebug               // 4 — lowest severity
+    LevelDebug Level = -1  // lowest severity
+    LevelInfo  Level = 0
+    LevelWarn  Level = 1
+    LevelError Level = 2
+    LevelFatal Level = 3   // highest severity
 )
 ```
 
-**Level ordering:** numeric value defines severity (`LevelFatal` = highest). Filters check `evt.Level >= cfg.MinLevel` where the comparison operator means "at least as severe as" (since lower numeric value = higher severity).
+**Level ordering:** filters check `evt.Level < cfg.MinLevel` — lower numeric value = less severe. Since `LevelDebug` is -1 and `LevelFatal` is 3, the comparison `evt.Level < cfg.MinLevel` correctly keeps events at or above the minimum level.
 
-**JSON serialization:** Level implements `json.Marshaler` and `json.Unmarshaler` to serialize as uppercase strings (`"ERROR"`, `"INFO"`).
+**Aliases:** CRITICAL and PANIC map to Fatal; WARNING maps to Warn; TRACE maps to Debug.
 
-```go
-func (l Level) MarshalJSON() ([]byte, error) {
-    return json.Marshal(l.String())
-}
-func (l *Level) UnmarshalJSON(b []byte) error {
-    var s string
-    if err := json.Unmarshal(b, &s); err != nil {
-        return err
-    }
-    *l = levelFromString(s)
-    return nil
-}
-```
-
-This is required for the Web UI's JSON responses — the frontend expects Level as strings, not integers.
+**JSON serialization:** Level implements `json.Marshaler` and `json.Unmarshaler` to serialize as uppercase strings (`"ERROR"`, `"INFO"`). On deserialization, unrecognized levels default to `LevelInfo`.
 
 ### Key structs
 
 ```go
 type Event struct {
-    Timestamp time.Time `json:"timestamp,omitempty"`
+    Timestamp time.Time `json:"timestamp"`
     Level     Level     `json:"level"`
-    Source    string    `json:"source"`     // filename or "stdin"
-    Message   string    `json:"message"`    // extracted message
-    Raw       string    `json:"raw"`        // original line
-    LineNum   int       `json:"line_num"`
+    Source    string    `json:"source"`   // filename or "stdin"
+    Message   string    `json:"message"`  // extracted message content
+    Raw       string    `json:"raw"`      // original line
+    LineNum   int       `json:"line"`     // 1-based (JSON key "line")
 }
 
 type Group struct {
-    Signature string   `json:"signature"`  // normalized message
-    Count     int      `json:"count"`
-    FirstSeen string   `json:"first_seen"` // ISO 8601
-    LastSeen  string   `json:"last_seen"`
-    Sample    string   `json:"sample"`     // first raw error line
+    Signature     string    `json:"signature"`       // normalized message
+    SampleMessage string    `json:"sample"`          // first raw message (not normalized)
+    Count         int       `json:"count"`
+    FirstSeen     time.Time `json:"first_seen"`
+    LastSeen      time.Time `json:"last_seen"`
+    Index         int       `json:"-"`               // heap position (internal)
 }
 
 type Report struct {
-    Filename    string            `json:"filename"`
-    TotalLines  int               `json:"total_lines"`
-    LevelCounts map[string]int    `json:"level_counts"`
-    Errors      []Group           `json:"errors,omitempty"`
-    Events      []Event           `json:"events,omitempty"`
-    StartTime   string            `json:"start_time,omitempty"`  // min timestamp
-    EndTime     string            `json:"end_time,omitempty"`    // max timestamp
-    Duration    string            `json:"duration,omitempty"`    // human duration
-	Command     string            `json:"command,omitempty"`     // "scan", "errors", "top", "grep"
+    Source     string         `json:"source"`
+    TotalLines int            `json:"total_lines"`
+    Levels     map[Level]int  `json:"-"`              // internal map
+    LevelsStr  map[string]int `json:"levels"`         // serialized as strings
+    TopErrors  []Group        `json:"top_errors,omitempty"`
+    FirstLine  time.Time      `json:"first_line"`
+    LastLine   time.Time      `json:"last_line"`
 }
 ```
 
+`Report` has a custom `MarshalJSON` that populates `LevelsStr` from `Levels` before serializing. `UnmarshalJSON` reverses the conversion. This allows the internal map to use `Level` keys while the JSON uses strings.
+
 ---
 
-## 3. Core Interfaces
+## 3. Core Functions
 
-Every package defines a single exported function (not an interface):
+Every package defines a single exported function (not an interface), except `summarizer` which uses an interface:
 
 | Package | Signatures | Purpose |
 |---|---|---|
-| `reader.ReadLines` | `(io.Reader, int) → chan Line` | Read line-by-line with line numbers |
-| `parser.ParseLine` | `(int, string, string) → *Event` | Extract level, timestamp, message |
+| `reader.ReadLines` | `(paths []string, stdin bool) → chan Line` | Read line-by-line with line numbers |
+| `parser.ParseLine` | `(raw string, lineNum int, source string) → model.Event` | Extract level, timestamp, message |
 | `normalizer.Normalize` | `(string) → string` | Replace IDs/paths with tokens |
-| `filter.ShouldKeep` | `(*Event, *Config) → bool` | Level/time/regex filter |
-| `analyzer.Analyze` | `(chan *Event, *Config) → *Report` | Streaming analysis |
-| `summarizer.Summarize` | `(context, SummaryRequest) → *Summary` | AI-powered error analysis |
-| `renderer.Render*` | `(*Report, io.Writer)` | Console/JSON/CSV output |
+| `filter.Matches` | `(evt model.Event, cfg Config) → bool` | Level/time/regex filter (value semantics) |
+| `analyzer.Analyze` | `(events <-chan model.Event, limit int) → Report` | Streaming analysis (value semantics) |
+| `summarizer.Summarizer` | Interface with `Summarize` and `SummarizeStream` | AI-powered error analysis |
+| `renderer.Print*` | `(model.Report or <-chan model.Event, io.Writer)` | Console/JSON/CSV output |
 
 ---
 
@@ -138,45 +108,61 @@ Every package defines a single exported function (not an interface):
 ### Input discovery — `reader.ReadLines`
 
 ```go
-func ReadLines(r io.Reader, fileThreshold int) chan Line
+func ReadLines(paths []string, stdin bool) chan Line
 ```
 
-- Determines if source is file vs stdin via size hint / `os.Stdin.Stat()`
-- For files: reads line-by-line via `bufio.Scanner`
-- For stdin: reads all bytes then splits lines (stdin pipes don't report size)
-- Returns lines on a channel; closing the channel signals EOF
-- Binary detection: reads first 8 KB, checks for null byte (`\x00`) — if found, logs warning and skips processing but still reports line count
+- If `stdin` is true or `paths` is empty, reads from `os.Stdin`
+- Otherwise, expands glob patterns via `filepath.Glob`; if no matches, uses pattern as literal path
+- Silently skips missing files and binary files
+- Binary detection: reads first 8192 bytes, checks for null byte (`\x00`)
+- Scanner buffer: 1 MB initial, 1 MB max line length
 
 ### Parser — `parser.ParseLine`
 
 ```go
-func ParseLine(lineNum int, line, source string) *Event
+func ParseLine(raw string, lineNum int, source string) model.Event
 ```
 
-- Returns `*Event` or `nil` if line cannot be parsed
-- Finds first timestamp using ordered regex patterns, parses to UTC
-- Finds level keyword using ordered match (FATAL → ERROR → WARN → INFO → DEBUG)
-- Extracts message (everything after timestamp; or after level keyword; or entire line)
+- Returns `model.Event` (value type, not pointer)
+- Extracts timestamp using ordered regex patterns (ISO 8601 → date+space → syslog → Apache CLF → epoch)
+- Extracts level using ordered keyword match with word boundaries
+- Extracts message: removes timestamp prefix, strips level keyword, cleans leading `:-[]()` characters
+- Falls back to entire raw line if no message can be extracted
+- Syslog dates use current year; adjusts back 1 year if > 24h in future
 
-### Filter — `filter.ShouldKeep`
+### Filter — `filter.Matches`
 
 ```go
-func ShouldKeep(evt *Event, cfg *Config) bool
+func Matches(evt model.Event, cfg Config) bool
 ```
 
-- Level: `evt.Level >= cfg.MinLevel` (lower number = more severe)
-- Regex: `cfg.Regex.MatchString(evt.Raw)`
-- Time: start/end time bounds (zero-value = no filter)
+```go
+type Config struct {
+    Regex    *regexp.Regexp
+    MinLevel model.Level
+    Since    time.Time
+    Until    time.Time
+}
+```
+
+- Level: `cfg.MinLevel > LevelDebug && evt.Level < cfg.MinLevel` (skips debug when any filter is set)
+- Regex: matched against `evt.Raw` (full line), not `evt.Message`
+- Time: zero-value timestamps pass through
 - All conditions must pass (AND logic)
-- Events without timestamps pass time filters
+- Value semantics for both `Event` and `Config`
 
 ### Analyzer — `analyzer.Analyze`
 
 ```go
-func Analyze(events chan *Event, cfg *Config) *Report
+func Analyze(events <-chan model.Event, limit int) Report
 ```
 
-Counts all events by level; for error-level events, normalizes message and tracks top-K groups via min-heap.
+- Counts all events by level
+- Tracks time range (min/max timestamp across all events)
+- For error-level events (`evt.Level >= LevelError`): normalizes message and tracks top-K groups
+- Group lookup is O(1) via `map[string]*Group`
+- Uses a min-heap for top-K tracking (bounded by `limit`; if `limit == 0`, unbounded)
+- Final groups sorted descending by count
 
 ---
 
@@ -190,20 +176,20 @@ Counts all events by level; for error-level events, normalizes message and track
 
 | Step | Pattern | Replacement | Example |
 |---|---|---|---|
-| 1 | UUID | `<uuid>` | `a1b2c3d4-...` → `<uuid>` |
-| 2 | Request ID | `<req>` | `req_abc123`, `rid:xyz` |
-| 3 | IPv6 | `<ip>` | `2001:db8::1` → `<ip>` |
-| 4 | IPv4 | `<ip>` | `10.0.0.5` → `<ip>` |
-| 5 | Hex | `<hex>` | `0xabcd1234` → `<hex>` |
-| 6 | File path | `<path>` | `/var/log/app.log` → `<path>` |
-| 7 | Hash | `<hash>` | `da39a3ee5e6b4b0d...` → `<hash>` |
-| 8 | Number | `<n>` | `5432`, `342`, `10.5` → `<n>` |
+| 1 | UUID (8-4-4-4-12 hex) | `<uuid>` | `a1b2c3d4-...` → `<uuid>` |
+| 2 | Request ID (`req_`, `request_`, `trace_`, `span_` + 8+ alphanum) | `<req>` | `req_abc123` → `<req>` |
+| 3 | IPv6 (full or `::1`) | `<ip>` | `2001:db8::1` → `<ip>` |
+| 4 | IPv4 (dotted decimal) | `<ip>` | `10.0.0.5` → `<ip>` |
+| 5 | Hex (`0x` prefix) | `<hex>` | `0xabcd1234` → `<hex>` |
+| 6 | File path (`/.../...`) | `<path>` | `/var/log/app.log` → `<path>` |
+| 7 | Hash (40+ hex chars) | `<hash>` | `da39a3ee5e6b4b0d...` → `<hash>` |
+| 8 | Standalone number | `<n>` | `5432`, `342` → `<n>` |
 
 ### Design decisions
 
-- **Order matters:** applying UUID before number prevents UUIDs from being partially matched as hex/numbers. Applying file paths before numbers prevents path components (like line numbers) from being consumed separately.
-- **Only error-level:** normalization is gated on `LevelError` and above. Non-error events are never normalized — they pass through to the event channel untouched.
-- **Boundary respect:** all patterns use `\b` word boundaries to avoid matching inside words (e.g., `v1` stays as-is, `log4j` stays as-is).
+- **Order matters:** UUID before hex/numbers prevents partial matches. File paths before numbers prevents path components (like line numbers) from being consumed separately.
+- **Only error-level:** normalization is gated on `LevelError` and above. Non-error events are never normalized.
+- **Boundary rules:** Most patterns use `\b` word boundaries. The file path pattern uses its own delimiter-based matching (`/`-starting paths).
 
 ---
 
@@ -214,52 +200,55 @@ Counts all events by level; for error-level events, normalizes message and track
 ### Event counting
 
 ```go
-counts := make(map[string]int)
+counts := make(map[model.Level]int)
 for evt := range events {
-    counts[evt.Level.String()]++
+    counts[evt.Level]++
 }
 ```
 
 ### Top-K error grouping
 
-Uses a **min-heap** (`container/heap`) bounded to `cfg.Limit`:
+Uses a **min-heap** (`container/heap`) bounded to `limit` with O(1) map lookup:
 
 ```go
-h := &GroupHeap{}
+groups := make(map[string]*Group)
+gh := &groupHeap{}
+
 for evt := range events {
-    if evt.Level >= model.LevelError {  // only group errors
-        sig := normalizer.Normalize(evt.Message)
-        if existing := h.Find(sig); existing != nil {
-            existing.Count++
-            existing.LastSeen = evt.Timestamp
-        } else {
-            heap.Push(h, &model.Group{
-                Signature: sig,
-                Count:     1,
-                FirstSeen: evt.Timestamp,
-                LastSeen:  evt.Timestamp,
-                Sample:    evt.Raw,
-            })
-        }
+    r.TotalLines++
+    r.Levels[evt.Level]++
+
+    if evt.Level < model.LevelError {
+        continue // only group errors
     }
-}
-// Trim to limit if over
-if h.Len() > cfg.Limit {
-    for h.Len() > cfg.Limit {
-        heap.Pop(h)
+
+    sig := normalizer.Normalize(evt.Message)
+    if g, ok := groups[sig]; ok {
+        g.Count++
+        if evt.Timestamp.After(g.LastSeen) {
+            g.LastSeen = evt.Timestamp
+        }
+        heap.Fix(gh, g.Index)
+    } else if gh.Len() < limit || limit == 0 {
+        heap.Push(gh, g)
+        groups[sig] = g
+    } else if g.Count > (*gh)[0].Count {
+        // evict min, add new
     }
 }
 ```
 
-### Find operation
+### Group heap
 
-`GroupHeap.Find` is O(n) linear scan with `Limit` items — acceptable for `Limit` ≤ `1000`. Each error event triggers a normalized key + linear scan.
+`groupHeap` implements `container/heap.Interface`. Min-heap ordered by Count ascending. `Push` sets `g.Index = n` and `Pop` sets `g.Index = -1` for map management.
 
 ### Design decisions
 
-- **Min-heap, not max-heap:** pops the smallest count when full; the surviving groups have the highest counts. Sorted by Count (ascending) in heap order.
-- **No deduplication during counting:** level counts include `FATAL`, `ERROR`, `WARN`, `INFO`, `DEBUG` regardless of grouping.
-- **Events go to two places:** events are always added to `Report.Events` (for errors/grep commands); only error-level events also update the heap.
+- **Map-based lookup (O(1)):** Tracks groups in `map[string]*Group` for immediate access, not O(n) linear scan.
+- **Min-heap, not max-heap:** When full, the smallest-count group sits at position 0 and is evicted first.
+- **heap.Fix for updates:** When an existing group's count is incremented, `heap.Fix` re-heapifies in O(log n).
+- **No deduplication during counting:** level counts include all events regardless of grouping.
+- **Events are not stored in Report:** The `Report` struct has no `Events` field. Events are returned separately by server handlers for `errors`/`grep` commands.
 
 ---
 
@@ -267,7 +256,7 @@ if h.Len() > cfg.Limit {
 
 ### Location: `internal/summarizer/`
 
-**Purpose:** Generate an AI-powered natural-language analysis of error patterns. Two implementations: noop (default, zero weight) and LLM (OpenAI-compatible HTTP).
+**Purpose:** Generate an AI-powered natural-language analysis of error patterns. Two implementations: noop (default) and LLM (OpenAI-compatible HTTP).
 
 ### Interface
 
@@ -278,7 +267,7 @@ type Summarizer interface {
 }
 ```
 
-### Request (`SummaryRequest`)
+### `SummaryRequest`
 
 | Field | Type | Description |
 |---|---|---|
@@ -292,16 +281,20 @@ type Summarizer interface {
 
 - Constructs a prompt with level distribution and top error groups (not raw lines)
 - POSTs to `{endpoint}/chat/completions` (OpenAI-compatible API)
+- System prompt: "You are a log analysis assistant. Be concise and direct."
 - Supports both sync and SSE streaming via `stream: true`
-- API key sent as `Authorization: Bearer` header
+- API key sent as `Authorization: Bearer` header from `LOGANALYZE_AI_KEY` env var
+- Temperature: 0.3, MaxTokens: 1000
+- Sync timeout: 60s (http.Client) + context-based timeout
+- Stream timeout: 120s (context-based)
 - Defaults to noop when no endpoint is configured
-- 60s timeout on sync, 120s on stream
 
 ### Integration
 
-- **CLI:** `scan` and `top` commands call `Summarize` after analysis if `--ai-endpoint` is set, render via `PrintAISummary` (strips markdown)
-- **Server:** `GET /api/insights/{id}` (sync) and `GET /api/insights/{id}/stream` (SSE) endpoints; results cached on session
+- **CLI:** `scan` and `top` commands call `Summarize` after analysis if `--ai-endpoint` is set
+- **Server:** `GET /api/insights/{id}` (sync, 60s timeout) and `GET /api/insights/{id}/stream` (SSE, 120s timeout); results cached on session
 - **Web UI:** AI Insights tab streams markdown content via `EventSource` and renders it client-side
+- Background summary: server also generates summary automatically after analysis completes via `generateSummary` goroutine
 
 ### Security
 
@@ -316,132 +309,107 @@ type Summarizer interface {
 
 ### Session management — `internal/session/session.go`
 
-- In-memory `sync.Map` keyed by UUID
-- Configurable cleanup interval (default 1 minute)
-- TTL per session: 1 hour since last access
-- Cleanup runs in a background goroutine
+- In-memory `map[string]*Session` protected by `sync.RWMutex`
+- Session ID: 16 random bytes → 32-char hex string (not UUID)
+- Cleanup every 10 minutes via background goroutine with `time.Ticker`
+- TTL per session: 1 hour since **creation** (not last access)
+- Status values: `"uploaded"` → `"running"` → `"complete"` or `"error"`
+
+### Router
+
+Uses Go 1.22 `http.ServeMux` with method-based routing. No middleware (no CORS, no logging, no recovery, no content-type enforcement). No signal handling / graceful shutdown.
 
 ### Endpoints
 
 #### `POST /api/upload`
 
 - Accepts multipart form with field `file`
-- Max file size: 100 MB (configurable via `http.MaxBytesReader`)
-- Copies file to `{dataDir}/{sessionID}.log`
-- Returns JSON: `{"session_id": "uuid","filename": "original.log","size": 12345}`
+- Max file size: 100 MB via `http.MaxBytesReader`
+- Copies file to `{dataDir}/{id}.log` (random 16-byte hex filename)
+- Returns JSON: `{"session_id": "..."}` (201 Created)
 
 #### `POST /api/analyze/{id}`
 
 - Body: `{"command":"scan","level":"error","regex":"","limit":10,"since":"","until":""}`
-- Validates session exists, checks for existing analysis
+- Validates session exists, sets status to `"running"`
 - Launches analysis in a background goroutine
-- Returns 202 with `{"status":"started","session_id":"..."}`
-- Stores results in session on completion
-- `command` field determines analysis mode: `scan` (no events list), `errors` (error-level events), `top` (grouped errors only), `grep` (all events)
+- Returns 202 with `{"status":"running"}`
+- `command` determines analysis mode: `scan`/`top` (grouped via analyzer), `errors`/`grep` (collect all events)
+- `errors` and `top` force `MinLevel` to `LevelError` regardless of request
 
 #### `GET /api/results/{id}`
 
-- Returns full `Report` as JSON with all events included
-- Includes `command` field in response
-- Returns 404 if session not found or analysis not complete
-- Returns 409 if session was deleted
+- Returns JSON with `status`, `command`, and if complete: `report`, `events`, `summary`
+- Returns 200 even for incomplete — caller should check `status` field
+- Returns 404 if session not found
 
 #### `GET /api/results/{id}/events`
 
 - Query params: `offset` (default 0), `limit` (default 100, max 1000)
-- Returns paginated events with total count, offset, and limit
+- Returns paginated events with total count
 - Response shape: `{"events":[...],"total":342,"offset":0,"limit":100}`
-- Events are sorted by line number
-- Returns 404 if session/analysis not found, or 400 if the command type has no events (scan/top return zero events)
+- Returns 200 with empty array if no events (rather than 400)
 
 #### `GET /api/status/{id}`
 
-- Server-Sent Events stream: `{"phase":"reading|parsing|analyzing|done","progress":50,"total":100}`
-- Phase transitions: `reading` → `parsing` → `analyzing` → `done`
-- Sent every 500ms or on phase change, whichever is sooner
+- Server-Sent Events stream: `event: progress\ndata: {"status":"running","progress":"..."}\n\n`
+- Events: `progress` (during), `complete` (on finish), `error` (on failure)
+- Polls every 500ms while streaming
 
 #### `GET /api/sessions`
 
-- Lists all active sessions with metadata (filename, size, command, status, created_at)
+- Lists all active sessions with id, file_name, status, created_at
 - Response: `{"sessions":[...]}`
 
 #### `DELETE /api/sessions/{id}`
 
 - Deletes session and uploaded file from disk
-- Returns 204 No Content
-- Idempotent (missing file is not an error)
+- Returns 200 with `{"deleted": true}`
+- Idempotent
 
 #### `GET /api/uploaded/{id}`
 
-- Returns the raw uploaded file as `application/octet-stream`
-- Useful for viewing the original file content in the Web UI's Raw tab
+- Returns the raw uploaded file as `text/plain; charset=utf-8`
 - Returns 404 if session not found
 
 #### `GET /health`
 
-- Returns `{"status":"ok","timestamp":"..."}`
+- Returns `{"status":"ok"}` (200)
 
 #### `GET /api/insights/{id}`
 
-- Returns AI-generated summary as JSON: `{"summary":"...", "model":"...", "cached":true|false}`
-- Requires `--ai-endpoint` to be configured at server start
+- Returns `{"summary":"...", "model":"...", "cached":true|false}`
+- Returns cached result if already generated
 - Returns 501 if summarizer not configured
 - Returns 409 if analysis is not yet complete
-- Results are cached on the session after first generation
 
 #### `GET /api/insights/{id}/stream`
 
 - Server-Sent Events stream of markdown content
-- Same preconditions as sync endpoint
-- Streams tokens as `data: {"type":"text","content":"..."}\n\n`
+- Sends tokens as `data: {"type":"text","content":"..."}\n\n`
 - Sends `event: complete` with `{"type":"done"}` when finished
 - Sends `event: error` with `{"type":"error","content":"..."}` on failure
 - Caches the complete response on session after streaming finishes
+- Returns cached text immediately if already generated
 
-### Router
-
-Uses `http.ServeMux` (Go 1.22+ method-based routing):
-
-```go
-mux := http.NewServeMux()
-mux.HandleFunc("POST /api/upload", ...)
-mux.HandleFunc("POST /api/analyze/{id}", ...)
-mux.HandleFunc("GET /api/results/{id}", ...)
-mux.HandleFunc("GET /api/results/{id}/events", ...)  // Go 1.22+ path prefix match
-mux.HandleFunc("GET /api/status/{id}", ...)
-mux.HandleFunc("GET /api/sessions", ...)
-mux.HandleFunc("DELETE /api/sessions/{id}", ...)
-mux.HandleFunc("GET /api/uploaded/{id}", ...)
-mux.HandleFunc("GET /api/insights/{id}", ...)
-mux.HandleFunc("GET /api/insights/{id}/stream", ...)
-mux.HandleFunc("GET /health", ...)
-```
-
-Static files are served via `//go:embed` using:
+### Background analysis
 
 ```go
-mux.Handle("/", http.FileServer(http.FS(webFS)))
+func (s *Server) runAnalysis(ses *session.Session) {
+    // reads file, parses lines, filters, dispatches to scan/top or errors/grep
+    if s.summarizer != nil && ses.Report != nil {
+        go s.generateSummary(ses)
+    }
+}
 ```
 
-Note: `http.StripPrefix` is NOT used — the embedded `static/` directory is structured so the file server serves `index.html` at root and all other assets at their relative paths.
-
-### Middleware
-
-- **CORS:** sets `Access-Control-Allow-Origin: *` and related headers on all API routes
-- **Content-Type:** enforces JSON content type for `POST` requests to `/api/analyze`
-- **Logging:** logs method, path, status, and duration to stderr
-- **Recovery:** catches panics, returns 500, logs stack trace
-- **Cleanup:** background goroutine removes expired sessions every 10 minutes
+- File existence checked before processing
+- Progress reported every 1000 parsed lines
+- AI summary generated in background after analysis completes (if configured)
 
 ### Signal handling
 
-```go
-sig := make(chan os.Signal, 1)
-signal.Notify(sig, syscall.SIGINT, syscall.SIGTERM)
-<-sig
-```
-
-Graceful shutdown: stop HTTP server, cancel contexts, wait for active analyses to finish (with 30s timeout).
+The server does **not** implement graceful shutdown. `http.ListenAndServe` runs directly with no `signal.Notify` trap.
 
 ---
 
@@ -452,108 +420,57 @@ Graceful shutdown: stop HTTP server, cancel contexts, wait for active analyses t
 ### Stack
 
 - **HTML:** Single-page application shell with inline theme detection
-- **CSS:** Design system with custom properties, no preprocessor (~450 lines)
-- **JS:** Vanilla ES module with zero dependencies (~550 lines)
+- **CSS:** Design system with custom properties, no preprocessor (~1209 lines)
+- **JS:** Vanilla ES module with zero dependencies (~1078 lines)
 
 ### CSS Design System
 
-```css
-:root {
-  /* Light theme (default) */
-  --bg-primary: #ffffff;
-  --bg-secondary: #f8f9fa;
-  --text-primary: #1a1a2e;
-  --text-secondary: #6c757d;
-  /* ... 40+ custom properties */
-}
-[data-theme="dark"] {
-  --bg-primary: #1a1a2e;
-  --bg-secondary: #16213e;
-  --text-primary: #e4e4e7;
-  --text-secondary: #a1a1aa;
-  /* ... same properties, dark values */
-}
-```
-
-- **Layout:** CSS Grid with fixed sidebar (260px) and scrollable main area
-- **Components:** cards, badges (level colors), tables, forms, buttons, progress bars, accordions, toast notifications, tabs
-- **Responsive:** collapses sidebar to top nav on screens < 768px
-- **Animations:** logo spin on hover, card entrance fade-up, accordion slide, toast slide-in
-- **Typography:** system font stack, monospace for logs
+- ~40+ custom properties for colors, spacing, typography
+- Dark theme (default) and light theme via `[data-theme]` attribute on `<html>`
+- Layout: CSS Grid with fixed sidebar (260px) and scrollable main area
+- Responsive: collapses sidebar to top nav at < 768px
+- Respects `prefers-reduced-motion`
 
 ### JS Architecture
 
-- **Module pattern:** IIFE returns `{init, state}` public API
-- **Routing:** hash-based (`/upload`, `/session/abc123`, `/` for dashboard)
-- **Event bus:** custom events on `document` for cross-component communication
-- **State:** `window.__state` object with sessions, current analysis, theme
+- Module pattern via IIFE returning public API / module-level functions
+- Routing: hash-based (`location.pathname`)
+- State: module-level variables (not `window.__state`)
+- Event bus: custom events on `document` for cross-component communication
 
 #### Pages
 
 | Route | Handler | Description |
 |---|---|---|
-| `#/` | `renderDashboard()` | Stats cards, session table, quick actions |
-| `#/upload` | `renderUpload()` | Drag-and-drop file area, command config, progress |
-| `#/session/:id` | `renderSession(id)` | 4-tab detail view (Overview, Events, AI Insights, Raw) |
+| `#/` | `renderDashboard()` | Stats cards, session table, delete |
+| `#/upload` | `renderUpload()` | Drag-and-drop, command config, progress SSE |
+| `#/session/:id` | `renderSession(id)` | 4-tab detail view |
 
-#### Dashboard (`renderDashboard`)
+#### Session detail tabs
 
-- Fetches `GET /api/sessions` on mount
-- Stat cards (files analyzed today, total errors found, etc.)
-- Session table: filename, command, size, status, created, actions (view, delete)
-- Loading state with fallback text, error state with toast notification
-
-#### Upload (`renderUpload`)
-
-- Drag-and-drop file upload with visual feedback (highlight on dragover)
-- Command selector (scan, errors, top, grep) with conditional regex input
-- Flag toggles (JSON mode, color, level selector)
-- Progress bar during analysis (polls `GET /api/status/{id}` SSE)
-- On completion, redirects to session detail page
-
-#### Session Detail (`renderSession`)
-
-Three vertical tabs: Overview, Events, Raw
-
-**Overview tab:**
-- Stat cards: total lines, errors, warnings, info, time range
-- SVG bar chart: level breakdown with percentage labels and color-coded bars
-- Error groups: collapsible accordion, each showing count, time range, normalized signature, sample raw line
-
-**Events tab:**
-- Dropdown filter for event level
-- Text search within displayed results
-- Paginated table (100 events per page) with page number navigation
-- Expandable rows showing the full raw log line
-- Fetches from `GET /api/results/{id}/events?offset=N&limit=M`
-- Shows empty state for scan/top commands (no events available)
-
-**Raw tab:**
-- Fetches from `GET /api/uploaded/{id}`
-- Line-numbered display in monospace font
-- Useful for seeing the original file context
+1. **Overview** — stat cards, SVG bar chart (level breakdown with percentage labels), collapsible error group accordion
+2. **Events** — level dropdown filter, text search, paginated table (100/page), expandable raw line rows
+3. **AI Insights** — streaming markdown via `EventSource(/api/insights/{id}/stream)` with markdown rendering (headings, lists, bold, italic, code, horizontal rules)
+4. **Raw** — line-numbered original file via `GET /api/uploaded/{id}`
 
 ### Theme
 
 - Detected on first visit via `prefers-color-scheme`
-- Toggled via button click (delegated event on `#theme-btn`)
-- Persisted to `localStorage` key `theme`
+- Toggled via sidebar button, persisted to `localStorage` key `theme`
 - If no stored preference, follows system preference
-- Updates all CSS custom properties via `[data-theme]` attribute on `<html>`
 
 ### Keyboard shortcuts
 
-| Shortcut | Handler |
+| Shortcut | Action |
 |---|---|
-| `⌘1` / `Ctrl+1` | Navigate to dashboard (`#/`) |
-| `⌘U` / `Ctrl+U` | Navigate to upload (`#/upload`) |
+| `⌘1` / `Ctrl+1` | Navigate to dashboard |
+| `⌘U` / `Ctrl+U` | Navigate to upload |
 
 ### Toast notification system
 
-- Queue-based: `showToast(message, type)` creates a `<div class="toast">` with auto-dismiss
+- Queue-based: `showToast(message, type)` creates auto-dismissed `<div class="toast">`
 - Types: `info`, `error`, `success`
-- Stacked: multiple toasts can be visible (each auto-dismisses after 4s)
-- Top-right positioning with slide-in animation
+- Each toast auto-dismisses after 4 seconds
 
 ---
 
@@ -562,7 +479,6 @@ Three vertical tabs: Overview, Events, Raw
 ### `Dockerfile`
 
 ```dockerfile
-# Builder
 FROM golang:1.22-alpine AS builder
 WORKDIR /app
 COPY go.mod go.sum ./
@@ -570,7 +486,6 @@ RUN go mod download
 COPY . .
 RUN CGO_ENABLED=0 go build -ldflags="-s -w" -o /app/loganalyze ./main.go
 
-# Runtime
 FROM alpine:3.20
 RUN apk add --no-cache ca-certificates tzdata
 COPY --from=builder /app/loganalyze /usr/local/bin/loganalyze
@@ -584,7 +499,6 @@ Key decisions:
 - `CGO_ENABLED=0` for static binary
 - `-ldflags="-s -w"` strips debug symbols
 - Alpine runtime with `ca-certificates` and `tzdata` for HTTPS and timezone support
-- Exposes port 8080 by default
 
 ### `docker-compose.yml`
 
@@ -605,9 +519,9 @@ volumes:
   logdata:
 ```
 
+- External port 8081 mapped to internal 8080
 - Named volume for uploaded file persistence
 - UTC timezone for consistent timestamp handling
-- Auto-restart unless explicitly stopped
 
 ---
 
@@ -627,7 +541,7 @@ Each `internal/` package has a `*_test.go` file:
 | `analyzer` | Counting, grouping, min-heap behavior, limit |
 | `renderer` | Console/JSON/CSV format output |
 | `session` | CRUD, TTL expiry, concurrent access |
-| `server` | HTTP handler integration (if present) |
+| `server` | HTTP handler integration |
 | `summarizer` | Prompt building, LLM sync/stream, HTTP error handling, auth, timeout, noop fallback |
 
 ### Test data
@@ -636,9 +550,9 @@ Each `internal/` package has a `*_test.go` file:
 
 | File | Format | Lines | Description |
 |---|---|---|---|
-| `errors.log` | Mixed timestamps | ~50 | Hand-crafted error lines with UUIDs, IPs, paths |
-| `syslog.log` | BSD syslog | ~30 | Kernel messages with various levels |
-| `apache.log` | Apache CLF | ~20 | Web access logs with mixed status codes |
+| `errors.log` | Mixed timestamps | 15 | Error lines with UUIDs, IPs, paths for normalization testing |
+| `syslog.log` | BSD syslog | 7 | Kernel messages with various levels |
+| `apache.log` | Apache CLF | 10 | Web access logs with mixed status codes |
 
 ### Running tests
 
@@ -649,7 +563,7 @@ go test ./...
 ### Test conventions
 
 - All test helpers use `t.Helper()`
-- Table-driven tests where appropriate (`tests []struct{name, input, expected}`)
+- Table-driven tests where appropriate
 - No external test dependencies (no test frameworks, no fixtures server)
 - Sample files are committed alongside source code
 - Golden files are used for renderer output comparison
@@ -665,7 +579,7 @@ go test ./...
 | **Group** | A collection of error events with the same normalized signature |
 | **Message** | The extracted textual content of a log line (excluding timestamp and level) |
 | **Normalizer** | Component that replaces variable data (IDs, IPs, numbers) with tokens |
-| **Report** | The complete analysis output (counts, groups, events, time range) |
+| **Report** | The complete analysis output (counts, groups, time range) |
 | **Session** | Server-side state for an uploaded file + its analysis results |
 | **Signature** | A normalized message string used for grouping identical errors |
 | **SSE** | Server-Sent Events — unidirectional event stream for progress updates |
@@ -676,27 +590,29 @@ go test ./...
 | Scenario | Behavior |
 |---|---|
 | Empty file | Returns report with zero counts, no errors |
-| Binary file | Logs warning to stderr, skips content, reports total_lines as 0 |
+| Binary file | Silently skipped (no output), no error |
 | No timestamps found | All events get zero-value time.Time (0001-01-01) |
 | No level keyword | Defaults to INFO |
-| Duplicate uploads | Each upload creates a new session with a new UUID |
+| Duplicate uploads | Each upload creates a new session with a new hex ID |
 | Concurrent analysis | Each session runs analysis in its own goroutine |
-| Session expiry | Cleanup runs every 10 minutes, removes sessions older than 1h |
+| Session expiry | Cleanup runs every 10 minutes, removes sessions older than 1h since creation |
 | Server restart | All sessions are lost (in-memory store, no persistence) |
 | Large files (>100MB) | Rejected at upload with 413 Payload Too Large |
-| No events for command | scan/top return empty events array; /events endpoint returns 400 |
-| Missing file in DELETE | No error — idempotent (file may already be cleaned up) |
+| No events for command | scan/top return empty events array (server returns 200 with empty array) |
+| Missing file in DELETE | No error — idempotent |
 | Partial analysis on shutdown | Results are discarded; client gets 404 on next fetch |
+| No signal handling | SIGINT/SIGTERM terminates immediately (no graceful shutdown) |
 
 ## Appendix C: HTTP Status Codes
 
 | Code | Usage |
 |---|---|
 | 200 | Successful GET/POST response with body |
+| 201 | Upload successful (session created) |
 | 202 | Analysis started (async) |
-| 204 | Successful DELETE (no body) |
-| 400 | Bad request (invalid command, missing file, no events for command type) |
-| 404 | Session not found, analysis not yet complete |
-| 409 | Session was deleted |
+| 400 | Bad request (invalid command, missing file, missing field) |
+| 404 | Session not found, file not found |
+| 409 | Analysis not complete yet |
 | 413 | Upload too large (>100 MB) |
 | 500 | Internal server error |
+| 501 | AI summarizer not configured |

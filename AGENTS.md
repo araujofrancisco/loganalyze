@@ -5,21 +5,18 @@
 - Web UI: embedded vanilla HTML+JS via `//go:embed`
 - Docker: multi-stage (golang:1.22 → alpine:3.20), ~7.6MB image
 
+## Architecture
+See [`ARCHITECTURE.md`](./ARCHITECTURE.md) for detailed architecture, data model, pipeline design, and component documentation.
+
 ## Conventions
 - All business logic in `internal/`; `cmd/` only wires flags and calls internal
 - Streaming-first: process line-by-line, never load full file
-- Errors returned, not logged; `main.go` is only place calling `os.Exit`
+- Errors returned, not logged (except `server/` handlers which use `log.Printf` for diagnostics)
+- `main.go` delegates to `cmd.Execute()`; `os.Exit(1)` called in `cmd/root.go`, `cmd/grep.go`, `cmd/serve.go`
 - ANSI colors via `fatih/color`, not raw escape sequences
 - Format detection is best-effort heuristic, no schema required
 - All diagnostics go to stderr; only output data to stdout
-- SIGINT/SIGTERM produces partial output (exit 130)
 - Server reuses same `internal/` engine as CLI — no duplication
-
-## Data flow
-CLI: Reader → Parser → Filter → Normalizer → Analyzer → Renderer
-Server: Browser → HTTP API → Server handlers → Engine (same internal/)
-
-Normalizer is only called during the Analyzer grouping step, not per-line.
 
 ## Commands
 - `scan [files...]` — full report
@@ -27,7 +24,8 @@ Normalizer is only called during the Analyzer grouping step, not per-line.
 - `top [files...]` — top N patterns (auto-forces `--level error`)
 - `grep [files...] <pattern>` — regex search (pattern is last positional arg)
 - `serve [--addr :8080] [--data /data]` — HTTP server with web UI
-- Global flags: `--since`, `--until`, `--level`, `--json`, `--csv`, `--no-color`, `--limit`
+- Global flags: `--since`, `--until`, `--level`, `--json`, `--csv`, `--no-color`, `--limit`,
+  `--ai-endpoint`, `--ai-model`
 
 ## Key gotchas
 - `--json` differs per command: `scan`/`top` → single JSON object; `errors`/`grep` → NDJSON (one object per line)
@@ -37,6 +35,8 @@ Normalizer is only called during the Analyzer grouping step, not per-line.
 - Docker Compose maps port **8081:8080** externally (not 8080:8080)
 - Server uses Go 1.22 `{id}` path patterns with `r.PathValue("id")`
 - Reader supports glob patterns; binary files (null bytes) are silently skipped
+- Normalizer is only called during the Analyzer grouping step, not per-line
+- `os.Exit` is called from `cmd/` package, not just `main.go`
 
 ## Normalization (applied in order)
 UUIDs → `<uuid>`, request IDs → `<req>`, IPv6/IPv4 → `<ip>`, hex → `<hex>`,
@@ -46,7 +46,6 @@ file paths → `<path>`, hashes (40+ hex) → `<hash>`, standalone numbers → `
 - Interface: `Summarizer` with `Summarize` (sync) and `SummarizeStream` (SSE)
 - Two impls: `noop` (default, zero weight) and `llm` (OpenAI-compatible HTTP, stdlib only)
 - Configured via `--ai-endpoint` / `LOGANALYZE_AI_ENDPOINT` env var and `LOGANALYZE_AI_KEY`
-- Prompt built from normalized error groups + level distribution, not raw lines
 - SSE streaming in web UI via `GET /api/insights/{id}/stream`
 - Summary cached on session after first generation
 - CLI flags available on `scan`, `top`, and `serve` commands
