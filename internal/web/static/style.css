@@ -681,6 +681,56 @@ table tr.clickable {
   display: block;
 }
 
+/* --- Copy button ------------------------------------------- */
+.event-row .btn-copy {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 24px;
+  height: 24px;
+  flex-shrink: 0;
+  border: none;
+  border-radius: var(--radius-sm);
+  background: transparent;
+  color: var(--text-tertiary);
+  font-size: 13px;
+  cursor: pointer;
+  opacity: 0;
+  transition: opacity var(--transition-fast), color var(--transition-fast), background var(--transition-fast);
+}
+.event-row:hover .btn-copy {
+  opacity: 1;
+}
+.event-row .btn-copy:hover {
+  background: var(--bg-hover);
+  color: var(--text-primary);
+}
+.event-row .btn-copy.copied {
+  color: var(--accent);
+  opacity: 1;
+}
+
+.card-header .btn-copy {
+  font-size: var(--fs-xs);
+  padding: 2px 10px;
+  border: 1px solid var(--border-light);
+  border-radius: var(--radius-sm);
+  background: var(--bg-hover);
+  color: var(--text-secondary);
+  cursor: pointer;
+  transition: background var(--transition-fast), color var(--transition-fast);
+  font-family: inherit;
+  line-height: inherit;
+}
+.card-header .btn-copy:hover {
+  background: var(--bg-overlay);
+  color: var(--text-primary);
+}
+.card-header .btn-copy.copied {
+  color: var(--accent);
+  border-color: var(--accent);
+}
+
 /* --- Error Group accordion --------------------------------- */
 .group-item {
   border: 1px solid var(--border-light);

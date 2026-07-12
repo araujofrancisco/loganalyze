@@ -19,6 +19,25 @@ function escapeHtml(s) {
   return d.innerHTML;
 }
 
+async function copyToClipboard(text, btnEl) {
+  try {
+    await navigator.clipboard.writeText(text);
+  } catch (_) {
+    const ta = document.createElement('textarea');
+    ta.value = text;
+    ta.style.position = 'fixed';
+    ta.style.left = '-9999px';
+    document.body.appendChild(ta);
+    ta.select();
+    document.execCommand('copy');
+    document.body.removeChild(ta);
+  }
+  const orig = btnEl.textContent;
+  btnEl.textContent = '\u2713 Copied';
+  btnEl.classList.add('copied');
+  setTimeout(() => { btnEl.textContent = orig; btnEl.classList.remove('copied'); }, 2000);
+}
+
 function inlineMarkdown(s) {
   return s
     .replace(/\*\*(.+?)\*\*/g, '<strong>$1</strong>')
@@ -616,6 +635,7 @@ async function renderUploadResults(sessionId, cmd, resultEl) {
 
   html += `<div style="margin-top:12px"><a href="/session/${sessionId}" class="btn btn-sm" data-nav>View full session →</a></div>`;
   resultEl.innerHTML = html;
+  setupEventExpand();
   if (data.report) {
     const chartEl = resultEl.querySelector('#level-chart');
     if (chartEl) renderLevelChart(chartEl, data.report.levels || {});
@@ -634,13 +654,11 @@ function renderSession(id) {
     <div class="tab-bar">
       <button class="tab-item active" data-tab="overview">Overview</button>
       <button class="tab-item" data-tab="events">Events</button>
-      <button class="tab-item" data-tab="watch">Watch</button>
       <button class="tab-item" data-tab="insights">AI Insights</button>
       <button class="tab-item" data-tab="raw">Raw</button>
     </div>
     <div id="tab-overview" class="tab-content active"><div class="card"><div class="empty-state"><h3>Loading...</h3></div></div></div>
     <div id="tab-events" class="tab-content"><div class="card"><div class="empty-state"><h3>Loading...</h3></div></div></div>
-    <div id="tab-watch" class="tab-content"><div class="card"><div class="empty-state"><h3>Click start to watch live log entries</h3></div></div></div>
     <div id="tab-insights" class="tab-content"><div class="card"><div class="empty-state"><h3>Loading...</h3></div></div></div>
     <div id="tab-raw" class="tab-content"><div class="empty-state" id="raw-loading"><h3>Loading...</h3></div></div>
   `;
@@ -665,10 +683,6 @@ function setupSessionTabs() {
       if (tabName === 'insights') {
         const id = location.pathname.split('/')[2];
         if (id) loadInsightsTab(id);
-      }
-      if (tabName === 'watch') {
-        const id = location.pathname.split('/')[2];
-        if (id) loadWatchTab(id);
       }
     });
   });
@@ -816,6 +830,7 @@ function buildEventRowHTML(e) {
       <span class="level-badge level-${level}">${level}</span>
       <span class="event-msg">${escapeHtml(e.message)}</span>
       <span class="event-line-num">#${e.line || ''}</span>
+      <button class="btn-copy" aria-label="Copy event" title="Copy event">&#x29C9;</button>
     </div>
     <div class="event-detail">${escapeHtml(e.raw || e.message)}</div>`;
 }
@@ -896,12 +911,23 @@ async function fetchEventsPage(id) {
 
 function setupEventExpand() {
   $$('.event-row[data-expand-event]').forEach(row => {
-    row.addEventListener('click', function() {
+    row.addEventListener('click', function(e) {
+      if (e.target.closest('.btn-copy')) return;
       const detail = this.nextElementSibling;
       if (detail && detail.classList.contains('event-detail')) {
         this.classList.toggle('expanded');
       }
     });
+    const btn = row.querySelector('.btn-copy');
+    if (btn) {
+      btn.addEventListener('click', function(e) {
+        e.stopPropagation();
+        const detail = row.nextElementSibling;
+        if (detail && detail.classList.contains('event-detail')) {
+          copyToClipboard(detail.textContent, this);
+        }
+      });
+    }
   });
 }
 
@@ -990,9 +1016,11 @@ function loadInsightsTab(id) {
   evtSource.addEventListener('complete', function() {
     evtSource.close();
     el.innerHTML = `<div class="card">
-      <div class="card-header"><h3>AI Insights</h3></div>
+      <div class="card-header"><h3>AI Insights</h3><button class="btn-copy" id="copy-insights-btn" aria-label="Copy insights">Copy</button></div>
       <div class="insights-text">${renderMarkdown(fullText)}</div>
     </div>`;
+    const copyBtn = $('#copy-insights-btn');
+    if (copyBtn) copyBtn.addEventListener('click', () => copyToClipboard(fullText, copyBtn));
   });
 
   evtSource.addEventListener('error', async function(e) {
@@ -1003,9 +1031,11 @@ function loadInsightsTab(id) {
         const data = await fetchJSON(`${API}/api/insights/${id}`);
         if (data.summary) {
           el.innerHTML = `<div class="card">
-            <div class="card-header"><h3>AI Insights</h3></div>
+            <div class="card-header"><h3>AI Insights</h3><button class="btn-copy" id="copy-insights-btn" aria-label="Copy insights">Copy</button></div>
             <div class="insights-text">${renderMarkdown(data.summary)}</div>
           </div>`;
+          const copyBtn = $('#copy-insights-btn');
+          if (copyBtn) copyBtn.addEventListener('click', () => copyToClipboard(data.summary, copyBtn));
           return;
         }
       } catch (_) {}
@@ -1022,116 +1052,6 @@ function loadInsightsTab(id) {
         <p>${escapeHtml(msg)}</p></div>
       </div>`;
     }
-  });
-}
-
-function loadWatchTab(id) {
-  const el = $('#tab-watch');
-  if (!el) return;
-
-  el.innerHTML = `<div class="card">
-    <div class="card-header" style="display:flex;align-items:center;gap:12px">
-      <h3>Live Watch</h3>
-      <button class="btn btn-primary" id="watch-start-btn">Start</button>
-      <button class="btn" id="watch-stop-btn" style="display:none">Stop</button>
-      <span id="watch-status" style="font-size:12px;color:var(--text-secondary)"></span>
-    </div>
-    <div id="watch-output" style="max-height:600px;overflow-y:auto;font-family:monospace;font-size:12px;line-height:1.5;padding:8px;background:var(--bg-secondary);border-radius:6px;white-space:pre-wrap;word-break:break-all;margin:0"></div>
-  </div>`;
-
-  let evtSource = null;
-  let flushPending = false;
-  let lineCount = 0;
-  const MAX_LINES = 200;
-  const output = $('#watch-output');
-  const startBtn = $('#watch-start-btn');
-  const stopBtn = $('#watch-stop-btn');
-  const status = $('#watch-status');
-
-  function cleanupWatch() {
-    if (evtSource) { evtSource.close(); evtSource = null; }
-    flushPending = false;
-  }
-
-  function flushWatchBuf(buf) {
-    flushPending = false;
-    if (buf.length === 0) return;
-    var atBottom = output.scrollTop + output.clientHeight >= output.scrollHeight - 50;
-    for (var i = 0; i < buf.length; i++) {
-      var div = document.createElement('div');
-      div.textContent = buf[i];
-      output.appendChild(div);
-      lineCount++;
-    }
-    buf.length = 0;
-    while (lineCount > MAX_LINES && output.firstChild) {
-      output.removeChild(output.firstChild);
-      lineCount--;
-    }
-    if (atBottom) {
-      output.scrollTop = output.scrollHeight;
-    }
-  }
-
-  function scheduleFlush(buf) {
-    if (flushPending) return;
-    flushPending = true;
-    requestAnimationFrame(function() {
-      flushWatchBuf(buf);
-    });
-  }
-
-  startBtn.addEventListener('click', function() {
-    if (evtSource) return;
-
-    output.innerHTML = '';
-    lineCount = 0;
-    startBtn.style.display = 'none';
-    stopBtn.style.display = '';
-    status.textContent = 'Connected';
-
-    var buf = [];
-    evtSource = new EventSource(`${API}/api/watch/${id}`);
-
-    evtSource.addEventListener('message', function(e) {
-      try {
-        var data = JSON.parse(e.data);
-        if (Array.isArray(data)) {
-          for (var j = 0; j < data.length; j++) {
-            if (data[j].type === 'event') {
-              buf.push(data[j].content);
-            }
-          }
-        } else if (data.type === 'event') {
-          buf.push(data.content);
-        }
-        if (buf.length > 0) scheduleFlush(buf);
-        status.textContent = 'Streaming';
-      } catch (_) {}
-    });
-
-    evtSource.addEventListener('complete', function() {
-      flushWatchBuf(buf);
-      cleanupWatch();
-      startBtn.style.display = '';
-      stopBtn.style.display = 'none';
-      status.textContent = 'Disconnected';
-    });
-
-    evtSource.addEventListener('error', function() {
-      flushWatchBuf(buf);
-      cleanupWatch();
-      startBtn.style.display = '';
-      stopBtn.style.display = 'none';
-      status.textContent = 'Connection failed';
-    });
-  });
-
-  stopBtn.addEventListener('click', function() {
-    cleanupWatch();
-    startBtn.style.display = '';
-    stopBtn.style.display = 'none';
-    status.textContent = 'Stopped';
   });
 }
 
@@ -1180,7 +1100,6 @@ document.addEventListener('keydown', (e) => {
     switch (e.key) {
       case '1': e.preventDefault(); navigate('/'); break;
       case 'u': e.preventDefault(); navigate('/upload'); break;
-      case 'w': e.preventDefault(); const id = location.pathname.split('/')[2]; if (id) { const el = $('#tab-watch'); if (el) { const btn = $('#watch-start-btn'); if (btn) btn.click(); } } break;
     }
   }
   if (e.key === 'Escape') {
