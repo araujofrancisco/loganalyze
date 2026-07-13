@@ -19,6 +19,25 @@ function escapeHtml(s) {
   return d.innerHTML;
 }
 
+async function copyToClipboard(text, btnEl) {
+  try {
+    await navigator.clipboard.writeText(text);
+  } catch (_) {
+    const ta = document.createElement('textarea');
+    ta.value = text;
+    ta.style.position = 'fixed';
+    ta.style.left = '-9999px';
+    document.body.appendChild(ta);
+    ta.select();
+    document.execCommand('copy');
+    document.body.removeChild(ta);
+  }
+  const orig = btnEl.textContent;
+  btnEl.textContent = '\u2713 Copied';
+  btnEl.classList.add('copied');
+  setTimeout(() => { btnEl.textContent = orig; btnEl.classList.remove('copied'); }, 2000);
+}
+
 function inlineMarkdown(s) {
   return s
     .replace(/\*\*(.+?)\*\*/g, '<strong>$1</strong>')
@@ -442,6 +461,12 @@ function renderUpload() {
           <label>Since</label>
           <input type="text" id="since" placeholder="e.g. 1h, 30m" autocomplete="off">
         </div>
+        <div class="form-group" style="display:flex;flex-direction:column;justify-content:flex-end">
+          <label style="display:flex;align-items:center;gap:8px;cursor:pointer;padding:6px 0">
+            <input type="checkbox" id="fold" checked>
+            <span>Fold stack traces</span>
+          </label>
+        </div>
       </div>
       <div style="margin-top:16px;display:flex;gap:8px;align-items:center">
         <button class="btn btn-primary" id="analyze-btn" disabled>Analyze</button>
@@ -533,12 +558,13 @@ async function startAnalysis() {
     const regex = $('#regex').value;
     const limit = parseInt($('#limit').value) || 10;
     const since = $('#since').value;
+    const fold = $('#fold').checked;
 
     progressText.textContent = 'Analyzing...';
     await fetchJSON(`${API}/api/analyze/${sessionId}`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ command: cmd, level, regex, limit, since })
+      body: JSON.stringify({ command: cmd, level, regex, limit, since, fold })
     });
 
     progressFill.style.width = '90%';
@@ -609,6 +635,7 @@ async function renderUploadResults(sessionId, cmd, resultEl) {
 
   html += `<div style="margin-top:12px"><a href="/session/${sessionId}" class="btn btn-sm" data-nav>View full session →</a></div>`;
   resultEl.innerHTML = html;
+  setupEventExpand();
   if (data.report) {
     const chartEl = resultEl.querySelector('#level-chart');
     if (chartEl) renderLevelChart(chartEl, data.report.levels || {});
@@ -803,6 +830,7 @@ function buildEventRowHTML(e) {
       <span class="level-badge level-${level}">${level}</span>
       <span class="event-msg">${escapeHtml(e.message)}</span>
       <span class="event-line-num">#${e.line || ''}</span>
+      <button class="btn-copy" aria-label="Copy event" title="Copy event">&#x29C9;</button>
     </div>
     <div class="event-detail">${escapeHtml(e.raw || e.message)}</div>`;
 }
@@ -883,12 +911,23 @@ async function fetchEventsPage(id) {
 
 function setupEventExpand() {
   $$('.event-row[data-expand-event]').forEach(row => {
-    row.addEventListener('click', function() {
+    row.addEventListener('click', function(e) {
+      if (e.target.closest('.btn-copy')) return;
       const detail = this.nextElementSibling;
       if (detail && detail.classList.contains('event-detail')) {
         this.classList.toggle('expanded');
       }
     });
+    const btn = row.querySelector('.btn-copy');
+    if (btn) {
+      btn.addEventListener('click', function(e) {
+        e.stopPropagation();
+        const detail = row.nextElementSibling;
+        if (detail && detail.classList.contains('event-detail')) {
+          copyToClipboard(detail.textContent, this);
+        }
+      });
+    }
   });
 }
 
@@ -977,9 +1016,11 @@ function loadInsightsTab(id) {
   evtSource.addEventListener('complete', function() {
     evtSource.close();
     el.innerHTML = `<div class="card">
-      <div class="card-header"><h3>AI Insights</h3></div>
+      <div class="card-header"><h3>AI Insights</h3><button class="btn-copy" id="copy-insights-btn" aria-label="Copy insights">Copy</button></div>
       <div class="insights-text">${renderMarkdown(fullText)}</div>
     </div>`;
+    const copyBtn = $('#copy-insights-btn');
+    if (copyBtn) copyBtn.addEventListener('click', () => copyToClipboard(fullText, copyBtn));
   });
 
   evtSource.addEventListener('error', async function(e) {
@@ -990,9 +1031,11 @@ function loadInsightsTab(id) {
         const data = await fetchJSON(`${API}/api/insights/${id}`);
         if (data.summary) {
           el.innerHTML = `<div class="card">
-            <div class="card-header"><h3>AI Insights</h3></div>
+            <div class="card-header"><h3>AI Insights</h3><button class="btn-copy" id="copy-insights-btn" aria-label="Copy insights">Copy</button></div>
             <div class="insights-text">${renderMarkdown(data.summary)}</div>
           </div>`;
+          const copyBtn = $('#copy-insights-btn');
+          if (copyBtn) copyBtn.addEventListener('click', () => copyToClipboard(data.summary, copyBtn));
           return;
         }
       } catch (_) {}

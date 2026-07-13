@@ -37,7 +37,11 @@ func PrintReport(r model.Report, w io.Writer) {
 	}
 	tw := tabwriter.NewWriter(w, 0, 0, 2, ' ', 0)
 
-	fmt.Fprintf(tw, "File:\t%s\n", r.Source)
+	if len(r.Sources) > 1 {
+		fmt.Fprintf(tw, "Files:\t%s\n", strings.Join(r.Sources, ", "))
+	} else {
+		fmt.Fprintf(tw, "File:\t%s\n", r.Source)
+	}
 	fmt.Fprintf(tw, "Total lines:\t%d\n", r.TotalLines)
 	if !r.FirstLine.IsZero() && !r.LastLine.IsZero() {
 		fmt.Fprintf(tw, "Time range:\t%s — %s (%s)\n",
@@ -87,7 +91,7 @@ func PrintErrors(events <-chan model.Event, w io.Writer) {
 		w = os.Stdout
 	}
 	for evt := range events {
-		line := formatEvent(evt)
+		line := FormatEvent(evt)
 		fmt.Fprintln(w, line)
 	}
 }
@@ -115,12 +119,12 @@ func PrintGrep(events <-chan model.Event, w io.Writer) {
 		w = os.Stdout
 	}
 	for evt := range events {
-		line := formatEvent(evt)
+		line := FormatEvent(evt)
 		fmt.Fprintln(w, line)
 	}
 }
 
-func formatEvent(evt model.Event) string {
+func FormatEvent(evt model.Event) string {
 	ts := ""
 	if !evt.Timestamp.IsZero() {
 		ts = evt.Timestamp.Format("2006-01-02 15:04:05")

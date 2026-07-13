@@ -17,6 +17,7 @@ var (
 	flagRegex      string
 	flagAIEndpoint string
 	flagAIModel    string
+	flagFold       bool
 )
 
 var rootCmd = &cobra.Command{
@@ -43,4 +44,5 @@ func init() {
 	rootCmd.PersistentFlags().StringVar(&flagRegex, "regex", "", "regex pattern filter")
 	rootCmd.PersistentFlags().StringVar(&flagAIEndpoint, "ai-endpoint", "", "OpenAI-compatible API endpoint for AI summary (also: LOGANALYZE_AI_ENDPOINT)")
 	rootCmd.PersistentFlags().StringVar(&flagAIModel, "ai-model", "gpt-4o-mini", "AI model name for summary (also: LOGANALYZE_AI_MODEL)")
+	rootCmd.PersistentFlags().BoolVar(&flagFold, "fold", false, "fold stack trace continuation lines into their parent error")
 }

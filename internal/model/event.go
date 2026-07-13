@@ -112,6 +112,7 @@ type Group struct {
 
 type Report struct {
 	Source     string         `json:"source"`
+	Sources    []string       `json:"sources,omitempty"`
 	TotalLines int            `json:"total_lines"`
 	Levels     map[Level]int  `json:"-"`
 	LevelsStr  map[string]int `json:"levels"`

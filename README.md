@@ -39,6 +39,7 @@ go build -o loganalyze ./main.go
 | `top` | `loganalyze top app.log --limit 20` | Top N recurring error patterns (supports `--ai-endpoint`) |
 | `grep` | `loganalyze grep app.log "timeout\|panic"` | Regex search with highlighting |
 | `serve` | `loganalyze serve --addr :8080` | HTTP server with web UI (supports `--ai-endpoint`) |
+| `watch` | `loganalyze watch app.log --level error` | Tail a log file with live filtering and periodic summaries (`--every 30s`) |
 
 ### Global flags
 
@@ -54,6 +55,7 @@ go build -o loganalyze ./main.go
 | `--regex` | `""` | Regex pattern filter (applies to scan/errors/top) |
 | `--ai-endpoint` | `""` | OpenAI-compatible API endpoint for AI summary (also: `LOGANALYZE_AI_ENDPOINT`) |
 | `--ai-model` | `gpt-4o-mini` | AI model name (also: `LOGANALYZE_AI_MODEL`) |
+| `--fold` | false | Fold stack trace continuation lines into their parent error (scan/errors/watch) |
 
 ### Examples
 
@@ -78,6 +80,12 @@ loganalyze scan app.log --json > report.json
 
 # Combined filters
 loganalyze grep app.log "5[0-9][0-9]" --level warn --since 2h
+
+# Live tail with stack trace folding
+loganalyze watch app.log --fold --level error
+
+# Periodic summary every 30 seconds
+loganalyze watch app.log --every 30s --limit 5
 ```
 
 ### Example output
@@ -460,8 +468,8 @@ go vet ./...
 ## Roadmap
 
 | Phase | Features |
-|---|---|
-| **3** | `watch` (tail -f), multi-file merged reports, stack trace folding, gzip decompression |
+|---|---|---|
+| **3** ✅ | `watch` (tail -f), multi-file merged reports, stack trace folding (`--fold`), gzip decompression |
 | **4** | JSON log field extraction, spike/anomaly detection, config file |
 | **5** | CI/CD (goreleaser), shell completions, Homebrew tap |
 | **6** | Interactive TUI (bubbletea) |

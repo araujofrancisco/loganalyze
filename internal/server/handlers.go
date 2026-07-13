@@ -1,6 +1,8 @@
 package server
 
 import (
+	"bytes"
+	"compress/gzip"
 	"context"
 	"crypto/rand"
 	"encoding/json"
@@ -16,6 +18,7 @@ import (
 
 	"github.com/araujofrancisco/loganalyze/internal/analyzer"
 	"github.com/araujofrancisco/loganalyze/internal/filter"
+	"github.com/araujofrancisco/loganalyze/internal/fold"
 	"github.com/araujofrancisco/loganalyze/internal/model"
 	"github.com/araujofrancisco/loganalyze/internal/parser"
 	"github.com/araujofrancisco/loganalyze/internal/reader"
@@ -79,6 +82,7 @@ func (s *Server) handleAnalyze(w http.ResponseWriter, r *http.Request) {
 		Limit   int    `json:"limit"`
 		Since   string `json:"since"`
 		Until   string `json:"until"`
+		Fold    bool   `json:"fold"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		jsonError(w, http.StatusBadRequest, "invalid request body")
@@ -105,6 +109,7 @@ func (s *Server) handleAnalyze(w http.ResponseWriter, r *http.Request) {
 		Limit:   req.Limit,
 		Since:   req.Since,
 		Until:   req.Until,
+		Fold:    req.Fold,
 	}
 	ses.SetRunning()
 
@@ -404,8 +409,22 @@ func (s *Server) handleRawUpload(w http.ResponseWriter, r *http.Request) {
 		jsonError(w, http.StatusNotFound, "file not found")
 		return
 	}
+	if isGzipBytes(data) {
+		gr, err := gzip.NewReader(bytes.NewReader(data))
+		if err == nil {
+			defer gr.Close()
+			decompressed, err := io.ReadAll(gr)
+			if err == nil {
+				data = decompressed
+			}
+		}
+	}
 	w.Header().Set("Content-Type", "text/plain; charset=utf-8")
 	w.Write(data)
+}
+
+func isGzipBytes(b []byte) bool {
+	return len(b) >= 2 && b[0] == 0x1f && b[1] == 0x8b
 }
 
 func parseInt(s string) (int, error) {
@@ -446,6 +465,9 @@ func (s *Server) runAnalysis(ses *session.Session) {
 	}
 
 	lines := reader.ReadLines([]string{ses.FilePath}, false)
+	if ses.Config.Fold {
+		lines = fold.Fold(lines, 50)
+	}
 
 	eventCh := make(chan model.Event, 1000)
 	go func() {
@@ -474,6 +496,7 @@ func (s *Server) runAnalysis(ses *session.Session) {
 		}
 		r := analyzer.Analyze(eventCh, limit)
 		r.Source = ses.FileName
+		r.Sources = []string{ses.FileName}
 		ses.SetProgress("analysis complete")
 		ses.SetComplete(&r, nil)
 	case "errors", "grep":

@@ -2,6 +2,7 @@ package reader
 
 import (
 	"bufio"
+	"compress/gzip"
 	"io"
 	"os"
 	"path/filepath"
@@ -40,10 +41,32 @@ func readFile(path string, ch chan<- Line) {
 		return
 	}
 	defer f.Close()
+
+	if isGzip(f) {
+		gr, err := gzip.NewReader(f)
+		if err != nil {
+			return
+		}
+		defer gr.Close()
+		readReader(gr, path, ch)
+		return
+	}
+
 	if isBinary(f) {
 		return
 	}
 	readReader(f, path, ch)
+}
+
+func isGzip(f *os.File) bool {
+	buf := make([]byte, 2)
+	n, _ := f.Read(buf)
+	if n < 2 {
+		f.Seek(0, 0)
+		return false
+	}
+	f.Seek(0, 0)
+	return buf[0] == 0x1f && buf[1] == 0x8b
 }
 
 func readReader(r io.Reader, source string, ch chan<- Line) {

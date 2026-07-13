@@ -19,13 +19,14 @@ See [`ARCHITECTURE.md`](./ARCHITECTURE.md) for detailed architecture, data model
 - Server reuses same `internal/` engine as CLI — no duplication
 
 ## Commands
-- `scan [files...]` — full report
+- `scan [files...]` — full report (supports multi-file via positional args)
 - `errors [files...]` — error lines (auto-forces `--level error`)
 - `top [files...]` — top N patterns (auto-forces `--level error`)
 - `grep [files...] <pattern>` — regex search (pattern is last positional arg)
+- `watch [files...] [--every 30s] [--no-tail]` — tail files with live filtering / periodic summaries
 - `serve [--addr :8080] [--data /data] [--rate-limit 60]` — HTTP server with web UI
 - Global flags: `--since`, `--until`, `--level`, `--json`, `--csv`, `--no-color`, `--limit`,
-  `--regex`, `--ai-endpoint`, `--ai-model`
+  `--regex`, `--ai-endpoint`, `--ai-model`, `--fold`
 
 ## Key gotchas
 - `--json` differs per command: `scan`/`top` → single JSON object; `errors`/`grep` → NDJSON (one object per line)
@@ -37,9 +38,13 @@ See [`ARCHITECTURE.md`](./ARCHITECTURE.md) for detailed architecture, data model
 - Server has middleware: panic recovery, request ID, logging, rate limiting (60/min default, configurable via `--rate-limit`)
 - Server implements graceful shutdown on SIGINT/SIGTERM (30s timeout)
 - All API errors return structured JSON (`{"error":"message"}`), not plain text
-- Reader supports glob patterns; binary files (null bytes) are silently skipped
+- Server has `/api/watch/{id}` SSE endpoint for live log tailing (no rate-limit, read-only)
+- Reader supports glob patterns; binary files (null bytes) are silently skipped; gzip files are transparently decompressed
+- `watch` command uses `reader.TailFile` (poll-based, no fsnotify dep); supports `--every` for periodic summaries and `--no-tail` to start from beginning
+- `--fold` merges stack trace continuation lines (leading whitespace) into their parent event; available in scan, errors, and watch
 - Normalizer is only called during the Analyzer grouping step, not per-line
 - `os.Exit` is called from `cmd/` package, not just `main.go`
+- Fold operates between Reader and Parser: `Reader → Fold → Parser → Filter → Analyzer`
 
 ## Normalization (applied in order)
 UUIDs → `<uuid>`, request IDs → `<req>`, IPv6/IPv4 → `<ip>`, hex → `<hex>`,
@@ -61,3 +66,16 @@ file paths → `<path>`, hashes (40+ hex) → `<hash>`, standalone numbers → `
 ## Build
 - `go build -o loganalyze ./main.go`
 - `docker build -t loganalyze .` / `docker compose up`
+
+## graphify
+
+This project has a knowledge graph at graphify-out/ with god nodes, community structure, and cross-file relationships.
+
+When the user types `/graphify`, use the installed graphify skill or instructions before doing anything else.
+
+Rules:
+- For codebase questions, first run `graphify query "<question>"` when graphify-out/graph.json exists. Use `graphify path "<A>" "<B>"` for relationships and `graphify explain "<concept>"` for focused concepts. These return a scoped subgraph, usually much smaller than GRAPH_REPORT.md or raw grep output.
+- Dirty graphify-out/ files are expected after hooks or incremental updates; dirty graph files are not a reason to skip graphify. Only skip graphify if the task is about stale or incorrect graph output, or the user explicitly says not to use it.
+- If graphify-out/wiki/index.md exists, use it for broad navigation instead of raw source browsing.
+- Read graphify-out/GRAPH_REPORT.md only for broad architecture review or when query/path/explain do not surface enough context.
+- After modifying code, run `graphify update .` to keep the graph current (AST-only, no API cost).
