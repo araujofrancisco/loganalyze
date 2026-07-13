@@ -2,15 +2,10 @@ package server
 
 import (
 	"encoding/json"
-	"fmt"
-	"io"
-	"net"
 	"net/http"
 	"net/http/httptest"
-	"os"
 	"strings"
 	"testing"
-	"time"
 
 	"github.com/araujofrancisco/loganalyze/internal/session"
 )
@@ -239,50 +234,6 @@ func TestAnalyzeLimitClamping(t *testing.T) {
 				t.Errorf("limit = %d, want %d", ses.Config.Limit, tt.expected)
 			}
 		})
-	}
-}
-
-func TestServerWatchStreamsEvents(t *testing.T) {
-	dir := t.TempDir()
-	srv := New(":0", dir)
-
-	path := dir + "/test.log"
-	content := "ERROR: something broke\nINFO: all good\nERROR: another failure\n"
-	if err := os.WriteFile(path, []byte(content), 0644); err != nil {
-		t.Fatal(err)
-	}
-	ses := srv.sessions.Create(path, "test.log", session.AnalyzeConfig{})
-
-	mux := http.NewServeMux()
-	mux.HandleFunc("GET /api/watch/{id}", srv.handleWatch)
-	handler := chain(mux, recoveryMiddleware, requestIDMiddleware, loggingMiddleware)
-
-	// Connect as a real HTTP client
-	ts := httptest.NewServer(handler)
-	defer ts.Close()
-
-	// Dial directly so we control the connection lifecycle
-	conn, err := net.Dial("tcp", ts.Listener.Addr().String())
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer conn.Close()
-
-	req := fmt.Sprintf("GET /api/watch/%s HTTP/1.1\r\nHost: %s\r\n\r\n", ses.ID, ts.Listener.Addr().String())
-	conn.Write([]byte(req))
-
-	// Read response — get all events, then context cancel will finish the handler
-	conn.SetReadDeadline(time.Now().Add(3 * time.Second))
-	data, err := io.ReadAll(conn)
-	if err != nil && !os.IsTimeout(err) {
-		t.Fatal(err)
-	}
-	result := string(data)
-	if !strings.Contains(result, "something broke") {
-		t.Errorf("expected event content, got: %s", result)
-	}
-	if !strings.Contains(result, "type\":\"event") {
-		t.Errorf("expected event type, got: %s", result)
 	}
 }
 

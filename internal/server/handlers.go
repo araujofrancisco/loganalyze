@@ -1,7 +1,6 @@
 package server
 
 import (
-	"bufio"
 	"bytes"
 	"compress/gzip"
 	"context"
@@ -23,7 +22,6 @@ import (
 	"github.com/araujofrancisco/loganalyze/internal/model"
 	"github.com/araujofrancisco/loganalyze/internal/parser"
 	"github.com/araujofrancisco/loganalyze/internal/reader"
-	"github.com/araujofrancisco/loganalyze/internal/renderer"
 	"github.com/araujofrancisco/loganalyze/internal/session"
 	"github.com/araujofrancisco/loganalyze/internal/summarizer"
 )
@@ -438,135 +436,6 @@ func parseInt(s string) (int, error) {
 		n = n*10 + int(c-'0')
 	}
 	return n, nil
-}
-
-func (s *Server) handleWatch(w http.ResponseWriter, r *http.Request) {
-	ses := s.getSession(w, r)
-	if ses == nil {
-		return
-	}
-
-	if _, err := os.Stat(ses.FilePath); os.IsNotExist(err) {
-		jsonError(w, http.StatusNotFound, "file not found")
-		return
-	}
-
-	flusher, ok := w.(http.Flusher)
-	if !ok {
-		jsonError(w, http.StatusInternalServerError, "streaming not supported")
-		return
-	}
-
-	w.Header().Set("Content-Type", "text/event-stream")
-	w.Header().Set("Cache-Control", "no-cache")
-	w.Header().Set("Connection", "keep-alive")
-
-	if rc := http.NewResponseController(w); rc != nil {
-		rc.SetWriteDeadline(time.Time{})
-	}
-
-	fmt.Fprintf(w, ":ok\n\n")
-	flusher.Flush()
-
-	ctx := r.Context()
-
-	// Send last N lines as initial context, then tail for new data
-	const initialLines = 50
-	contextEvents, _ := readLastEvents(ses.FilePath, initialLines)
-	for _, evt := range contextEvents {
-		line := stripANSI(renderer.FormatEvent(evt))
-		data, _ := json.Marshal(map[string]interface{}{
-			"type":    "event",
-			"content": line,
-			"line":    evt.LineNum,
-			"level":   evt.Level.String(),
-		})
-		fmt.Fprintf(w, "data: %s\n\n", data)
-		flusher.Flush()
-	}
-
-	lineCh, err := reader.TailFile(ctx, ses.FilePath, true)
-	if err != nil {
-		return
-	}
-
-	eventCh := make(chan model.Event, 100)
-	go func() {
-		defer close(eventCh)
-		for line := range lineCh {
-			evt := parser.ParseLine(line.Text, line.Line, line.Source)
-			eventCh <- evt
-		}
-	}()
-
-	const batchSize = 50
-	const batchInterval = 200 * time.Millisecond
-	ticker := time.NewTicker(batchInterval)
-	defer ticker.Stop()
-
-	batch := make([]map[string]interface{}, 0, batchSize)
-	flushBatch := func() {
-		if len(batch) == 0 {
-			return
-		}
-		data, _ := json.Marshal(batch)
-		fmt.Fprintf(w, "data: %s\n\n", data)
-		flusher.Flush()
-		batch = batch[:0]
-	}
-
-	for {
-		select {
-		case evt, ok := <-eventCh:
-			if !ok {
-				flushBatch()
-				return
-			}
-			line := stripANSI(renderer.FormatEvent(evt))
-			batch = append(batch, map[string]interface{}{
-				"type":    "event",
-				"content": line,
-				"line":    evt.LineNum,
-				"level":   evt.Level.String(),
-			})
-			if len(batch) >= batchSize {
-				flushBatch()
-			}
-		case <-ticker.C:
-			flushBatch()
-		case <-ctx.Done():
-			flushBatch()
-			return
-		}
-	}
-}
-
-func readLastEvents(path string, n int) ([]model.Event, error) {
-	f, err := os.Open(path)
-	if err != nil {
-		return nil, err
-	}
-	defer f.Close()
-
-	scanner := bufio.NewScanner(f)
-	scanner.Buffer(make([]byte, 1024*1024), 1024*1024)
-	var buf []model.Event
-	lineNum := 0
-	for scanner.Scan() {
-		lineNum++
-		evt := parser.ParseLine(scanner.Text(), lineNum, path)
-		buf = append(buf, evt)
-		if len(buf) > n {
-			buf = buf[1:]
-		}
-	}
-	return buf, scanner.Err()
-}
-
-var ansiRe = regexp.MustCompile(`\x1b\[[0-9;]*m`)
-
-func stripANSI(s string) string {
-	return ansiRe.ReplaceAllString(s, "")
 }
 
 func (s *Server) handleHealth(w http.ResponseWriter, r *http.Request) {
